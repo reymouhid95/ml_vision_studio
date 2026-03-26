@@ -1,0 +1,34 @@
+# Virtualenv
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Dataset et modèles entraînés (trop volumineux pour git)
+cats_vs_dogs/data/
+cats_vs_dogs/models/
+
+# Fichiers modèles Keras / sklearn
+*.keras
+*.h5
+*.joblib
+*.npz
+
+# Caches TensorFlow / Keras
+~/.keras/
+~/.cache/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Éditeurs
+.vscode/
+.idea/
+*.swp
