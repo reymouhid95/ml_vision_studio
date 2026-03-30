@@ -15,9 +15,10 @@ IMG_SIZE    = 96       # résolution commune ML + DL
 CLASS_NAMES = ["chat", "chien"]   # label 0 = cat, 1 = dog dans cats_vs_dogs
 
 # Taille des splits par défaut
-N_TRAIN = 1400
-N_VAL   = 300
-N_TEST  = 300
+# Le dataset complet a ~23 000 images ; 7 000 offre un bon compromis vitesse/précision.
+N_TRAIN = 5000
+N_VAL   = 1000
+N_TEST  = 1000
 
 
 def _npz(split: str) -> Path:

@@ -20,6 +20,7 @@ import tempfile
 # - ssl patch:      covers urllib (Keras weight downloads)
 # - env vars:       covers requests + TensorFlow Hub downloads
 import certifi
+
 ssl._create_default_https_context = lambda: ssl.create_default_context(
     cafile=certifi.where()
 )
@@ -42,6 +43,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from cats_vs_dogs.data_prep import CLASS_NAMES as CD_CLASS_NAMES
+from cats_vs_dogs.data_prep import (download_and_prepare, is_prepared,
+                                    load_split, split_counts)
+from cats_vs_dogs.dl_model import model_trained as dl_model_trained
+from cats_vs_dogs.dl_model import predict_dl, train_dl_model
+from cats_vs_dogs.ml_model import models_trained as ml_models_trained
+from cats_vs_dogs.ml_model import predict_ml, train_ml_models
 from core.audio_trainer import HP_BATCH_OPTS as AUD_BATCH_OPTS
 from core.audio_trainer import HP_LR_OPTS as AUD_LR_OPTS
 from core.audio_trainer import (extract_mel_features, predict_audio,
@@ -57,16 +65,6 @@ from utils.augmentation import augment_image
 from utils.confusion_matrix import make_confusion_figure
 from utils.pdf_import import extract_pdf_page_images, extract_pdf_text
 from utils.url_import import fetch_url_text
-from cats_vs_dogs.data_prep import (
-    download_and_prepare, is_prepared, load_split, split_counts,
-    CLASS_NAMES as CD_CLASS_NAMES,
-)
-from cats_vs_dogs.ml_model import (
-    train_ml_models, predict_ml, models_trained as ml_models_trained,
-)
-from cats_vs_dogs.dl_model import (
-    train_dl_model, predict_dl, model_trained as dl_model_trained,
-)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STATE
@@ -691,7 +689,7 @@ def cd_train_ml():
     yield log, fig_svm, fig_rf
 
 
-def cd_train_dl(epochs: int, batch_size: int):
+def cd_train_dl(finetune_epochs: int, batch_size: int):
     if not is_prepared():
         yield "Données non disponibles. Téléchargez d'abord le dataset.", None, None
         return
@@ -703,11 +701,19 @@ def cd_train_dl(epochs: int, batch_size: int):
     log     = ""
     results = None
     gen = train_dl_model(X_tr, y_tr, X_v, y_v, X_te, y_te,
-                         epochs=epochs, batch_size=batch_size)
+                         finetune_epochs=finetune_epochs, batch_size=batch_size)
     for item in gen:
-        if item[0] == "epoch":
+        if item[0] == "phase":
+            _, num, p1, p2 = item
+            label = ("🔒 Base gelée" if num == 1
+                     else "🔓 Fine-tuning (top 30 couches)")
+            log += f"\n── Phase {num} — {label} ──\n"
+            yield log, None, None
+        elif item[0] == "epoch":
             _, ep, total, tl, ta, vl, va = item
-            log += f"Époque {ep}/{total} — loss {tl:.4f}  acc {ta:.3f}  val_loss {vl:.4f}  val_acc {va:.3f}\n"
+            log += (f"Époque {ep:>3}/{total} — "
+                    f"loss {tl:.4f}  acc {ta:.3f}  "
+                    f"val_loss {vl:.4f}  val_acc {va:.3f}\n")
             yield log, None, None
         elif item[0] == "done":
             results = item[1]
@@ -728,9 +734,9 @@ def cd_train_dl(epochs: int, batch_size: int):
 
 def cd_predict(img):
     if img is None:
-        return "Chargez une image.", None, None, None
+        return "Chargez une image.", None, None, None, None
 
-    # Normalize PIL → float32 numpy [0,1]
+    # Normalisation PIL → float32 numpy [0,1]
     pil = Image.fromarray(img).convert("RGB").resize((96, 96))
     arr = np.array(pil, dtype=np.float32) / 255.0
 
@@ -745,16 +751,27 @@ def cd_predict(img):
         results["CNN"] = predict_dl(arr)
 
     if not results:
-        return "Aucun modèle entraîné. Entraînez SVM/RF et/ou le CNN d'abord.", None, None, None
+        return "Aucun modèle entraîné. Entraînez SVM/RF et/ou le CNN d'abord.", None, None, None, None
 
-    def _label(probs: dict) -> dict:
-        return {f"{k} ({v:.1%})": v for k, v in probs.items()}
+    # ── Ensemble pondéré ──────────────────────────────────────────────────────
+    # CNN (transfer learning) reçoit plus de poids car bien plus précis
+    WEIGHTS = {"CNN": 0.60, "SVM": 0.20, "RF": 0.20}
+    ensemble: dict[str, float] = {cls: 0.0 for cls in CD_CLASS_NAMES}
+    total_w = sum(WEIGHTS[k] for k in results)
+    for name, probs in results.items():
+        w = WEIGHTS[name] / total_w   # renormalise si certains modèles manquent
+        for cls in CD_CLASS_NAMES:
+            ensemble[cls] += w * probs.get(cls, 0.0)
+
+    def _label(probs: dict) -> dict | None:
+        return {f"{k} ({v:.1%})": v for k, v in probs.items()} if probs else None
 
     return (
         "Prédictions effectuées.",
-        _label(results.get("SVM", {})) or None,
-        _label(results.get("RF",  {})) or None,
-        _label(results.get("CNN", {})) or None,
+        _label(results.get("SVM", {})),
+        _label(results.get("RF",  {})),
+        _label(results.get("CNN", {})),
+        _label(ensemble),
     )
 
 
@@ -1122,15 +1139,17 @@ def build_ui():
                     )
 
                 # ── Approche DL ───────────────────────────────────────────────
-                with gr.Accordion("3. Approche DL — CNN", open=False):
+                with gr.Accordion("3. Approche DL — Transfer Learning MobileNetV2", open=False):
                     gr.Markdown(
-                        "**Architecture** : Conv2D(32→64→128) → BN → MaxPool → GlobalAvgPool "
-                        "→ Dense(128) → Dropout(0.5) → Softmax  \n"
-                        "Augmentation : flip horizontal, rotation ±10°, zoom ±10%"
+                        "**Base** : MobileNetV2 pré-entraîné ImageNet (gelé en phase 1)  \n"
+                        "**Tête** : GlobalAvgPool → Dense(128) → Dropout(0.3) → Softmax  \n"
+                        "**Phase 1** (10 époques, lr=1e-3) — tête seule  \n"
+                        "**Phase 2** (époques configurables, lr=1e-5) — fine-tuning top 30 couches  \n"
+                        "Augmentation : flip horizontal, rotation ±10°, zoom ±10°, luminosité ±10%"
                     )
                     with gr.Row():
-                        cd_dl_epochs = gr.Slider(5, 40, value=20, step=1,
-                                                 label="Époques max")
+                        cd_dl_epochs = gr.Slider(5, 30, value=15, step=1,
+                                                 label="Époques fine-tuning (phase 2)")
                         cd_dl_batch  = gr.Slider(8, 64, value=32, step=8,
                                                  label="Batch size")
                     cd_cnn_btn    = gr.Button("Entraîner le CNN", variant="primary")
@@ -1145,18 +1164,23 @@ def build_ui():
 
                 # ── Prédiction ────────────────────────────────────────────────
                 with gr.Accordion("4. Prédiction", open=False):
-                    gr.Markdown("Chargez une image — les modèles entraînés prédisent en parallèle.")
+                    gr.Markdown(
+                        "Chargez une image — les modèles entraînés prédisent en parallèle.  \n"
+                        "**Ensemble** : moyenne pondérée CNN×0.6 + SVM×0.2 + RF×0.2"
+                    )
                     cd_pred_img = gr.Image(label="Image", type="numpy", height=250)
                     cd_pred_btn = gr.Button("Prédire", variant="primary")
                     cd_pred_msg = gr.Textbox(label="Statut", interactive=False)
                     with gr.Row():
-                        cd_pred_svm = gr.Label(label="SVM",  num_top_classes=2)
-                        cd_pred_rf  = gr.Label(label="RF",   num_top_classes=2)
-                        cd_pred_cnn = gr.Label(label="CNN",  num_top_classes=2)
+                        cd_pred_svm      = gr.Label(label="SVM",      num_top_classes=2)
+                        cd_pred_rf       = gr.Label(label="RF",        num_top_classes=2)
+                        cd_pred_cnn      = gr.Label(label="CNN",       num_top_classes=2)
+                        cd_pred_ensemble = gr.Label(label="🏆 Ensemble", num_top_classes=2)
                     cd_pred_btn.click(
                         fn=cd_predict,
                         inputs=cd_pred_img,
-                        outputs=[cd_pred_msg, cd_pred_svm, cd_pred_rf, cd_pred_cnn],
+                        outputs=[cd_pred_msg, cd_pred_svm, cd_pred_rf,
+                                 cd_pred_cnn, cd_pred_ensemble],
                     )
 
             # ── TAB 6 : CHAT ──────────────────────────────────────────────────
@@ -1199,5 +1223,5 @@ if __name__ == "__main__":
         server_name="127.0.0.1",
         server_port=7860,
         inbrowser=False,   # ouvre le navigateur manuellement sur http://127.0.0.1:7860
-        share=False,
+        share=True,
     )
