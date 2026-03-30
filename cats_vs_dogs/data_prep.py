@@ -26,13 +26,30 @@ def _npz(split: str) -> Path:
 
 
 def is_prepared() -> bool:
-    return all(_npz(s).exists() for s in ("train", "val", "test"))
+    for s in ("train", "val", "test"):
+        p = _npz(s)
+        if not p.exists():
+            return False
+        try:
+            d = np.load(p)
+            _ = d["labels"].shape  # probe integrity
+        except Exception:
+            p.unlink(missing_ok=True)  # delete corrupted file
+            return False
+    return True
 
 
 def load_split(split: str) -> tuple[np.ndarray, np.ndarray]:
     """Retourne (images, labels) depuis le fichier npz sauvegardé."""
-    d = np.load(_npz(split))
-    return d["images"].astype(np.float32), d["labels"].astype(np.int32)
+    try:
+        d = np.load(_npz(split))
+        return d["images"].astype(np.float32), d["labels"].astype(np.int32)
+    except (EOFError, Exception) as e:
+        _npz(split).unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Fichier {split}.npz corrompu (supprimé). "
+            "Cliquez sur 'Télécharger le dataset' pour le re-préparer."
+        ) from e
 
 
 def split_counts() -> dict[str, int]:
