@@ -27,6 +27,33 @@ ssl._create_default_https_context = lambda: ssl.create_default_context(
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 
+# Patch gradio_client — bug "additionalProperties: false" (booléen au lieu de dict)
+# get_type() et _json_schema_to_python_type() reçoivent parfois schema=False
+# → "argument of type 'bool' is not iterable". Appliqué ici pour couvrir local + Colab.
+try:
+    import importlib, pathlib
+    import gradio_client.utils as _gc_utils
+    _gc_path = pathlib.Path(_gc_utils.__file__)
+    _src = _gc_path.read_text()
+    _changed = False
+    if 'if not isinstance(schema, dict): return "any"' not in _src:
+        _src = _src.replace(
+            "def get_type(schema: dict):",
+            'def get_type(schema: dict):\n    if not isinstance(schema, dict): return "any"',
+        )
+        _changed = True
+    if 'if not isinstance(schema, dict): return "Any"' not in _src:
+        _src = _src.replace(
+            "    if schema == {}:",
+            '    if not isinstance(schema, dict): return "Any"\n    if schema == {}:',
+        )
+        _changed = True
+    if _changed:
+        _gc_path.write_text(_src)
+        importlib.reload(_gc_utils)
+except Exception:
+    pass  # ne jamais bloquer le démarrage pour ça
+
 # Support HEIC/HEIF (photos iPhone)
 try:
     import pillow_heif
