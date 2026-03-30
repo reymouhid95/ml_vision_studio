@@ -87,6 +87,37 @@ from core.image_trainer import predict_image, train_image_model
 from core.text_trainer import (build_knn_index, classify_knn, classify_with_nn,
                                embed_single, knn_leave_one_out,
                                split_text_into_chunks, train_text_nn_model)
+# Datasets de démo
+from datasets.flowers import (
+    download_and_prepare as flowers_download,
+    is_prepared as flowers_prepared,
+    load_all_as_image_classes as flowers_load,
+    sample_counts as flowers_counts,
+)
+from datasets.speech_commands import (
+    download_and_prepare as speech_download,
+    is_prepared as speech_prepared,
+    load_all_as_audio_classes as speech_load,
+    CLASS_NAMES as SPEECH_CLASS_NAMES,
+)
+from datasets.text_datasets import (
+    download_and_prepare as agnews_download,
+    is_prepared as agnews_prepared,
+    load_all_as_text_classes as agnews_load,
+    sample_counts as agnews_counts,
+)
+# Suggestions automatiques
+from utils.suggestions import (
+    analyze_class_balance,
+    analyze_training_results,
+    format_suggestions,
+)
+# Courbes d'apprentissage
+from utils.learning_curve import (
+    image_learning_curve,
+    audio_learning_curve,
+    text_learning_curve,
+)
 from PIL import Image
 from utils.augmentation import augment_image
 from utils.confusion_matrix import make_confusion_figure
@@ -239,11 +270,14 @@ def img_capture_sample(image, active_cls: str, state: dict):
 def img_train(epochs, lr, batch_size, units, state, progress=gr.Progress()):
     classes = state["image_classes"]
     if len(classes) < 2:
-        yield state, "Ajoutez au moins 2 classes.", None, None
+        yield state, "Ajoutez au moins 2 classes.", None, None, ""
         return
     if any(len(c["samples"]) < 3 for c in classes):
-        yield state, "Chaque classe doit avoir au moins 3 images.", None, None
+        yield state, "Chaque classe doit avoir au moins 3 images.", None, None, ""
         return
+
+    # Suggestions avant entraînement
+    pre_sugg = analyze_class_balance(classes)
 
     log_lines: list[str] = []
     loss_hist: list[float] = []
@@ -257,7 +291,7 @@ def img_train(epochs, lr, batch_size, units, state, progress=gr.Progress()):
             progress(ep / total, desc=f"Époque {ep}/{total}")
             log_lines.append(f"[{ep:3d}/{total}]  perte={loss:.4f}  acc={acc:.2%}")
             loss_hist.append(loss)
-            yield state, "\n".join(log_lines[-20:]), _loss_fig(loss_hist), None
+            yield state, "\n".join(log_lines[-20:]), _loss_fig(loss_hist), None, ""
 
         elif tag == "done":
             _, model, lh, cnames, preds, actuals = update
@@ -266,8 +300,14 @@ def img_train(epochs, lr, batch_size, units, state, progress=gr.Progress()):
             state["image_class_names"] = cnames
             state["image_trained"]     = True
             conf = make_confusion_figure(preds, actuals, cnames)
+
+            train_acc = sum(p == a for p, a in zip(preds, actuals)) / max(len(preds), 1)
+            post_sugg = analyze_training_results(
+                lh, train_acc=train_acc, n_classes=len(cnames)
+            )
+            sugg_txt = format_suggestions(pre_sugg + post_sugg)
             log_lines.append("✓ Entraînement terminé !")
-            yield state, "\n".join(log_lines[-20:]), _loss_fig(lh), conf
+            yield state, "\n".join(log_lines[-20:]), _loss_fig(lh), conf, sugg_txt
 
 
 def img_predict(image, state: dict):
@@ -327,14 +367,17 @@ def aud_add_sample(audio_path, active_cls: str, state: dict):
 def aud_train(epochs, lr, batch_size, units, state, progress=gr.Progress()):
     classes = state["audio_classes"]
     if len(classes) < 2:
-        yield state, "Ajoutez au moins 2 classes.", None, None
+        yield state, "Ajoutez au moins 2 classes.", None, None, ""
         return
     if any(len(c["samples"]) < 3 for c in classes):
-        yield state, "Chaque classe doit avoir au moins 3 échantillons.", None, None
+        yield state, "Chaque classe doit avoir au moins 3 échantillons.", None, None, ""
         return
+
+    pre_sugg = analyze_class_balance(classes)
 
     log_lines: list[str] = []
     loss_hist: list[float] = []
+    last_val_acc: float | None = None
 
     for update in train_audio_model(
         classes, epochs=epochs, lr=lr, batch_size=batch_size, hidden_units=units
@@ -346,9 +389,10 @@ def aud_train(epochs, lr, batch_size, units, state, progress=gr.Progress()):
             line = f"[{ep:3d}/{total}]  perte={loss:.4f}  acc={acc:.2%}"
             if val_acc is not None:
                 line += f"  val={val_acc:.2%}"
+                last_val_acc = val_acc
             log_lines.append(line)
             loss_hist.append(loss)
-            yield state, "\n".join(log_lines[-20:]), _loss_fig(loss_hist), None
+            yield state, "\n".join(log_lines[-20:]), _loss_fig(loss_hist), None, ""
 
         elif tag == "done":
             _, model, lh, cnames, preds, actuals = update
@@ -357,8 +401,14 @@ def aud_train(epochs, lr, batch_size, units, state, progress=gr.Progress()):
             state["audio_class_names"] = cnames
             state["audio_trained"]     = True
             conf = make_confusion_figure(preds, actuals, cnames)
+
+            train_acc = sum(p == a for p, a in zip(preds, actuals)) / max(len(preds), 1)
+            post_sugg = analyze_training_results(
+                lh, train_acc=train_acc, val_acc=last_val_acc, n_classes=len(cnames)
+            )
+            sugg_txt = format_suggestions(pre_sugg + post_sugg)
             log_lines.append("✓ Entraînement audio terminé !")
-            yield state, "\n".join(log_lines[-20:]), _loss_fig(lh), conf
+            yield state, "\n".join(log_lines[-20:]), _loss_fig(lh), conf, sugg_txt
 
 
 def aud_predict(audio_path, state: dict):
@@ -447,19 +497,25 @@ def txt_add_direct(text: str, active_cls: str, state: dict):
 def txt_index_knn(state: dict, progress=gr.Progress()):
     classes = state["text_classes"]
     if len(classes) < 2:
-        return state, "Ajoutez au moins 2 classes.", None
+        return state, "Ajoutez au moins 2 classes.", None, ""
     if any(len(c["samples"]) < 1 for c in classes):
-        return state, "Chaque classe doit avoir au moins 1 texte.", None
+        return state, "Chaque classe doit avoir au moins 1 texte.", None, ""
+
+    pre_sugg = analyze_class_balance(classes)
 
     progress(0, desc="Chargement USE…")
     try:
         knn_entries, class_names = build_knn_index(classes)
     except Exception as e:
-        return state, f"Erreur indexation : {e}", None
+        return state, f"Erreur indexation : {e}", None, ""
 
     progress(0.7, desc="Évaluation leave-one-out…")
     preds, actuals = knn_leave_one_out(knn_entries, class_names)
     conf = make_confusion_figure(preds, actuals, class_names)
+
+    loo_acc = sum(p == a for p, a in zip(preds, actuals)) / max(len(preds), 1)
+    post_sugg = analyze_training_results([], train_acc=loo_acc, n_classes=len(class_names))
+    sugg_txt = format_suggestions(pre_sugg + post_sugg)
 
     state = _s(state)
     state["text_knn"]          = knn_entries
@@ -467,7 +523,7 @@ def txt_index_knn(state: dict, progress=gr.Progress()):
     state["text_trained"]      = True
     state["text_mode"]         = "knn"
     progress(1.0, desc="Terminé")
-    return state, f"✓ {len(knn_entries)} embeddings indexés.", conf
+    return state, f"✓ {len(knn_entries)} embeddings indexés. LOO acc={loo_acc:.1%}", conf, sugg_txt
 
 
 def txt_train_nn(state: dict, progress=gr.Progress()):
@@ -560,6 +616,175 @@ def txt_load_json(file_obj, state: dict):
         )
     except Exception as e:
         return state, f"Erreur chargement JSON : {e}", None, _text_summary(state)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  DATASET DE DÉMO CALLBACKS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── tf_flowers (Image) ────────────────────────────────────────────────────────
+
+def flowers_status_str() -> str:
+    if not flowers_prepared():
+        return "Dataset non téléchargé."
+    counts = flowers_counts()
+    lines = [f"✓ tf_flowers prêt — {sum(counts.values())} images"]
+    for name, n in counts.items():
+        lines.append(f"  • {name}: {n}")
+    return "\n".join(lines)
+
+
+def flowers_prepare_cb():
+    yield "Téléchargement tf_flowers (~210 MB la première fois)…"
+    try:
+        msg = flowers_download()
+        yield msg
+    except Exception as e:
+        yield f"Erreur : {e}"
+
+
+def flowers_to_image_cb(state: dict):
+    if not flowers_prepared():
+        return state, gr.Dropdown(), _image_summary(state), "Téléchargez d'abord tf_flowers."
+    import copy
+    classes = flowers_load()
+    state = _s(state)
+    state["image_classes"] = copy.deepcopy(classes)
+    state["image_trained"] = False
+    state["image_model"]   = None
+    choices = _cls_choices(classes)
+    n = sum(len(c["samples"]) for c in classes)
+    return (
+        state,
+        gr.Dropdown(choices=choices, value=choices[0] if choices else None),
+        _image_summary(state),
+        f"✓ {n} images chargées ({len(classes)} classes) — prêt à entraîner !",
+    )
+
+
+# ── Speech Commands (Audio) ───────────────────────────────────────────────────
+
+def speech_status_str() -> str:
+    if not speech_prepared():
+        return "Dataset non téléchargé."
+    lines = ["✓ Speech Commands prêt"]
+    for name in SPEECH_CLASS_NAMES:
+        from pathlib import Path
+        p = Path(__file__).parent / "datasets" / "speech_data" / f"{name}.npz"
+        if p.exists():
+            import numpy as np
+            n = np.load(p)["features"].shape[0]
+            lines.append(f"  • {name}: {n} clips")
+    return "\n".join(lines)
+
+
+def speech_prepare_cb():
+    yield "Téléchargement Speech Commands (~150 MB, premiers shards uniquement)…"
+    try:
+        msg = speech_download()
+        yield msg
+    except Exception as e:
+        yield f"Erreur : {e}"
+
+
+def speech_to_audio_cb(state: dict):
+    if not speech_prepared():
+        return state, gr.Dropdown(), _audio_summary(state), "Téléchargez d'abord Speech Commands."
+    import copy
+    classes = speech_load()
+    state = _s(state)
+    state["audio_classes"] = copy.deepcopy(classes)
+    state["audio_trained"] = False
+    state["audio_model"]   = None
+    choices = _cls_choices(classes)
+    n = sum(len(c["samples"]) for c in classes)
+    return (
+        state,
+        gr.Dropdown(choices=choices, value=choices[0] if choices else None),
+        _audio_summary(state),
+        f"✓ {n} clips chargés ({len(classes)} classes) — prêt à entraîner !",
+    )
+
+
+# ── AG News (Texte) ───────────────────────────────────────────────────────────
+
+def agnews_status_str() -> str:
+    if not agnews_prepared():
+        return "Dataset non téléchargé."
+    counts = agnews_counts()
+    lines = [f"✓ AG News prêt — {sum(counts.values())} articles"]
+    for name, n in counts.items():
+        lines.append(f"  • {name}: {n}")
+    return "\n".join(lines)
+
+
+def agnews_prepare_cb():
+    yield "Téléchargement AG News (~31 MB la première fois)…"
+    try:
+        msg = agnews_download()
+        yield msg
+    except Exception as e:
+        yield f"Erreur : {e}"
+
+
+def agnews_to_text_cb(state: dict):
+    if not agnews_prepared():
+        return state, gr.Dropdown(), _text_summary(state), "Téléchargez d'abord AG News."
+    import copy
+    classes = agnews_load()
+    state = _s(state)
+    state["text_classes"]  = copy.deepcopy(classes)
+    state["text_trained"]  = False
+    state["text_knn"]      = []
+    state["text_model"]    = None
+    choices = _cls_choices(classes)
+    n = sum(len(c["samples"]) for c in classes)
+    return (
+        state,
+        gr.Dropdown(choices=choices, value=choices[0] if choices else None),
+        _text_summary(state),
+        f"✓ {n} articles chargés ({len(classes)} classes) — prêt à indexer !",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  COURBES D'APPRENTISSAGE CALLBACKS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def img_lc_cb(state: dict):
+    classes = state["image_classes"]
+    if len(classes) < 2:
+        return None, "Ajoutez au moins 2 classes avec des images."
+    if any(len(c["samples"]) < 2 for c in classes):
+        return None, "Chaque classe doit avoir au moins 2 images."
+    try:
+        fig, diag = image_learning_curve(classes)
+        return fig, diag
+    except Exception as e:
+        return None, f"Erreur : {e}"
+
+
+def aud_lc_cb(state: dict):
+    classes = state["audio_classes"]
+    if len(classes) < 2:
+        return None, "Ajoutez au moins 2 classes avec des échantillons."
+    if any(len(c["samples"]) < 2 for c in classes):
+        return None, "Chaque classe doit avoir au moins 2 échantillons."
+    try:
+        fig, diag = audio_learning_curve(classes)
+        return fig, diag
+    except Exception as e:
+        return None, f"Erreur : {e}"
+
+
+def txt_lc_cb(state: dict):
+    if not state["text_trained"] or not state["text_knn"]:
+        return None, "Indexez d'abord les embeddings KNN."
+    try:
+        fig, diag = text_learning_curve(state["text_knn"], state["text_class_names"])
+        return fig, diag
+    except Exception as e:
+        return None, f"Erreur : {e}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -904,11 +1129,37 @@ def build_ui():
                         )
                         img_loss = gr.Plot(label="Courbe de perte")
                         img_conf = gr.Plot(label="Matrice de confusion")
+                        img_suggestions = gr.Textbox(
+                            label="Suggestions", interactive=False, lines=3
+                        )
                         with gr.Row():
                             img_save_btn = gr.Button("Sauvegarder modèle")
                             img_save_file = gr.File(
                                 label="Fichier modèle", visible=False, interactive=False
                             )
+                        with gr.Accordion("📈 Courbe d'apprentissage", open=False):
+                            gr.Markdown(
+                                "Analyse si collecter plus de données améliorerait le modèle.  \n"
+                                "Utilise les features MobileNetV2 + Régression Logistique (rapide)."
+                            )
+                            img_lc_btn  = gr.Button("Générer la courbe", variant="secondary")
+                            img_lc_plot = gr.Plot(label="Courbe d'apprentissage")
+                            img_lc_diag = gr.Textbox(
+                                label="Diagnostic", interactive=False, lines=4
+                            )
+
+                with gr.Accordion("💡 Dataset de démo — tf_flowers (5 classes)", open=False):
+                    gr.Markdown(
+                        "**tf_flowers** contient ~3600 images de fleurs (daisy, dandelion, "
+                        "roses, sunflowers, tulips). Téléchargement ~210 MB via tensorflow_datasets."
+                    )
+                    fl_status_txt = gr.Textbox(
+                        value=flowers_status_str, label="Statut", interactive=False, lines=3
+                    )
+                    with gr.Row():
+                        fl_dl_btn   = gr.Button("Télécharger tf_flowers")
+                        fl_load_btn = gr.Button("Charger dans Image", variant="primary")
+                    fl_dl_log = gr.Textbox(label="Progression", lines=2, interactive=False)
 
                 img_add_btn.click(
                     fn=img_add_class,
@@ -923,12 +1174,23 @@ def build_ui():
                 img_train_btn.click(
                     fn=img_train,
                     inputs=[img_epochs, img_lr, img_batch, img_units, state],
-                    outputs=[state, img_log, img_loss, img_conf],
+                    outputs=[state, img_log, img_loss, img_conf, img_suggestions],
                 )
                 img_save_btn.click(
                     fn=img_save_model,
                     inputs=state,
                     outputs=img_save_file,
+                )
+                img_lc_btn.click(
+                    fn=img_lc_cb,
+                    inputs=state,
+                    outputs=[img_lc_plot, img_lc_diag],
+                )
+                fl_dl_btn.click(fn=flowers_prepare_cb, outputs=fl_dl_log)
+                fl_load_btn.click(
+                    fn=flowers_to_image_cb,
+                    inputs=state,
+                    outputs=[state, img_cls_drop, img_summary, fl_dl_log],
                 )
 
             # ── TAB 3 : AUDIO ─────────────────────────────────────────────────
@@ -983,11 +1245,37 @@ def build_ui():
                         )
                         aud_loss = gr.Plot(label="Courbe de perte")
                         aud_conf = gr.Plot(label="Matrice de confusion")
+                        aud_suggestions = gr.Textbox(
+                            label="Suggestions", interactive=False, lines=3
+                        )
                         with gr.Row():
                             aud_save_btn  = gr.Button("Sauvegarder modèle")
                             aud_save_file = gr.File(
                                 label="Fichier modèle", visible=False, interactive=False
                             )
+                        with gr.Accordion("📈 Courbe d'apprentissage", open=False):
+                            gr.Markdown(
+                                "Ré-entraîne le réseau dense sur des fractions croissantes.  \n"
+                                "Durée estimée : 5–15 secondes."
+                            )
+                            aud_lc_btn  = gr.Button("Générer la courbe", variant="secondary")
+                            aud_lc_plot = gr.Plot(label="Courbe d'apprentissage")
+                            aud_lc_diag = gr.Textbox(
+                                label="Diagnostic", interactive=False, lines=4
+                            )
+
+                with gr.Accordion("💡 Dataset de démo — Speech Commands (10 mots)", open=False):
+                    gr.Markdown(
+                        "**Speech Commands** (Google) — 10 mots : yes/no/up/down/left/right/on/off/stop/go.  \n"
+                        "Téléchargement partiel ~150 MB (premiers shards seulement)."
+                    )
+                    sp_status_txt = gr.Textbox(
+                        value=speech_status_str, label="Statut", interactive=False, lines=3
+                    )
+                    with gr.Row():
+                        sp_dl_btn   = gr.Button("Télécharger Speech Commands")
+                        sp_load_btn = gr.Button("Charger dans Audio", variant="primary")
+                    sp_dl_log = gr.Textbox(label="Progression", lines=2, interactive=False)
 
                 aud_add_btn.click(
                     fn=aud_add_class,
@@ -1002,12 +1290,23 @@ def build_ui():
                 aud_train_btn.click(
                     fn=aud_train,
                     inputs=[aud_epochs, aud_lr, aud_batch, aud_units, state],
-                    outputs=[state, aud_log, aud_loss, aud_conf],
+                    outputs=[state, aud_log, aud_loss, aud_conf, aud_suggestions],
                 )
                 aud_save_btn.click(
                     fn=aud_save_model,
                     inputs=state,
                     outputs=aud_save_file,
+                )
+                aud_lc_btn.click(
+                    fn=aud_lc_cb,
+                    inputs=state,
+                    outputs=[aud_lc_plot, aud_lc_diag],
+                )
+                sp_dl_btn.click(fn=speech_prepare_cb, outputs=sp_dl_log)
+                sp_load_btn.click(
+                    fn=speech_to_audio_cb,
+                    inputs=state,
+                    outputs=[state, aud_cls_drop, aud_summary, sp_dl_log],
                 )
 
             # ── TAB 4 : TEXTE ─────────────────────────────────────────────────
@@ -1069,6 +1368,9 @@ def build_ui():
                             label="Journal", lines=6, interactive=False
                         )
                         txt_conf = gr.Plot(label="Matrice de confusion")
+                        txt_suggestions = gr.Textbox(
+                            label="Suggestions", interactive=False, lines=3
+                        )
                         with gr.Row():
                             txt_export_btn  = gr.Button("Exporter JSON")
                             txt_export_file = gr.File(
@@ -1077,6 +1379,29 @@ def build_ui():
                             txt_load_btn = gr.UploadButton(
                                 "Importer JSON", file_types=[".json"]
                             )
+                        with gr.Accordion("📈 Courbe d'apprentissage", open=False):
+                            gr.Markdown(
+                                "KNN LOO sur des fractions croissantes des embeddings.  \n"
+                                "Nécessite d'indexer les embeddings d'abord."
+                            )
+                            txt_lc_btn  = gr.Button("Générer la courbe", variant="secondary")
+                            txt_lc_plot = gr.Plot(label="Courbe d'apprentissage")
+                            txt_lc_diag = gr.Textbox(
+                                label="Diagnostic", interactive=False, lines=4
+                            )
+
+                with gr.Accordion("💡 Dataset de démo — AG News (4 classes)", open=False):
+                    gr.Markdown(
+                        "**AG News** — articles de presse en 4 catégories : Monde, Sports, Business, Tech.  \n"
+                        "Téléchargement ~31 MB via tensorflow_datasets."
+                    )
+                    ag_status_txt = gr.Textbox(
+                        value=agnews_status_str, label="Statut", interactive=False, lines=3
+                    )
+                    with gr.Row():
+                        ag_dl_btn   = gr.Button("Télécharger AG News")
+                        ag_load_btn = gr.Button("Charger dans Texte", variant="primary")
+                    ag_dl_log = gr.Textbox(label="Progression", lines=2, interactive=False)
 
                 txt_add_btn.click(
                     fn=txt_add_class,
@@ -1101,7 +1426,7 @@ def build_ui():
                 txt_index_btn.click(
                     fn=txt_index_knn,
                     inputs=state,
-                    outputs=[state, txt_log, txt_conf],
+                    outputs=[state, txt_log, txt_conf, txt_suggestions],
                 )
                 txt_nn_train_btn.click(
                     fn=txt_train_nn,
@@ -1117,6 +1442,17 @@ def build_ui():
                     fn=txt_load_json,
                     inputs=[txt_load_btn, state],
                     outputs=[state, txt_log, txt_cls_drop, txt_summary],
+                )
+                ag_dl_btn.click(fn=agnews_prepare_cb, outputs=ag_dl_log)
+                ag_load_btn.click(
+                    fn=agnews_to_text_cb,
+                    inputs=state,
+                    outputs=[state, txt_cls_drop, txt_summary, ag_dl_log],
+                )
+                txt_lc_btn.click(
+                    fn=txt_lc_cb,
+                    inputs=state,
+                    outputs=[txt_lc_plot, txt_lc_diag],
                 )
                 # Sync mode radio → state
                 def _set_text_mode(mode_str: str, st: dict):
