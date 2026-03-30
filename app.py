@@ -1251,4 +1251,6 @@ if __name__ == "__main__":
         server_port=7860,
         inbrowser=False,   # ouvre le navigateur manuellement sur http://127.0.0.1:7860
         share=True,
+        debug=True,
+        show_error=True,
     )
