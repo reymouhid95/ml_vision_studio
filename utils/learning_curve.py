@@ -253,8 +253,8 @@ def audio_learning_curve(
                   batch_size=max(4, n_use // 8),
                   verbose=0, shuffle=True)
 
-        tr_preds  = model.predict(X_sub,  verbose=0).argmax(axis=1)
-        val_preds = model.predict(X_val, verbose=0).argmax(axis=1)
+        tr_preds  = model(X_sub,  training=False).numpy().argmax(axis=1)
+        val_preds = model(X_val, training=False).numpy().argmax(axis=1)
         sizes.append(n_use)
         train_accs.append(float((tr_preds == y_sub).mean()))
         val_accs.append(float((val_preds == y_val).mean()))
