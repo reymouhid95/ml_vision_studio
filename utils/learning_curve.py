@@ -131,14 +131,18 @@ def image_learning_curve(
     if n_total < n_classes * 2:
         return None, "Pas assez d'exemples (minimum 2 par classe)."
 
-    # Extraction de features (passage unique dans MobileNetV2)
+    # Extraction de features (passage unique dans MobileNetV2, par batches → pas d'OOM)
     xs_arr = np.array(xs_raw, dtype=np.float32)
     base = tf.keras.applications.MobileNetV2(
         input_shape=(IMG_SIZE, IMG_SIZE, 3), include_top=False, weights="imagenet"
     )
     pool = tf.keras.layers.GlobalAveragePooling2D()
-    feat_t = base(xs_arr, training=False)
-    feats  = pool(feat_t).numpy()   # (N, 1280)
+    BATCH = 32
+    feat_list = []
+    for i in range(0, len(xs_arr), BATCH):
+        batch = xs_arr[i:i + BATCH]
+        feat_list.append(pool(base(batch, training=False)).numpy())
+    feats = np.concatenate(feat_list, axis=0)   # (N, 1280)
 
     # Mélange reproductible
     rng = np.random.default_rng(42)
