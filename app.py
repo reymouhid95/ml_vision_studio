@@ -107,6 +107,13 @@ from utils.augmentation import augment_image
 from utils.confusion_matrix import make_confusion_figure
 from utils.pdf_import import extract_pdf_page_images, extract_pdf_text
 from utils.url_import import fetch_url_text
+from core.price_predictor import (
+    generate_dataset,
+    train_price_model,
+    predict_price,
+    make_dataset_figure,
+    make_regression_figure,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STATE
@@ -131,6 +138,14 @@ def make_initial_state() -> dict:
         "text_class_names":  [],
         "text_mode":         "knn",
         "text_trained":      False,
+        # Prix maison
+        "price_model":       None,
+        "price_metrics":     None,
+        "price_X":           None,
+        "price_y":           None,
+        "price_X_test":      None,
+        "price_y_test":      None,
+        "price_y_pred":      None,
     }
 
 
@@ -1024,6 +1039,75 @@ def cd_predict(img):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  PRIX MAISON — CALLBACKS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def price_generate_dataset_cb(n_samples: int, noise_level: float, state: dict):
+    """Génère et affiche le dataset synthétique."""
+    X, y = generate_dataset(int(n_samples), float(noise_level))
+    st = _s(state)
+    st["price_X"] = X
+    st["price_y"] = y
+    fig = make_dataset_figure(X, y)
+    msg = (
+        f"Dataset généré : {len(y)} maisons\n"
+        f"Surface : {X.min():.0f} – {X.max():.0f} m²\n"
+        f"Prix    : {y.min():.0f} – {y.max():.0f} k€\n"
+        f"Relation réelle : prix ≈ 2.5 × surface + 50 (+ bruit)"
+    )
+    return st, fig, msg
+
+
+def price_train_cb(n_samples: int, noise_level: float, state: dict):
+    """Entraîne la régression linéaire et retourne métriques + figure."""
+    model, metrics, X, y, X_test, y_test, y_pred = train_price_model(
+        int(n_samples), float(noise_level)
+    )
+    st = _s(state)
+    st["price_model"]   = model
+    st["price_metrics"] = metrics
+    st["price_X"]       = X
+    st["price_y"]       = y
+    st["price_X_test"]  = X_test
+    st["price_y_test"]  = y_test
+    st["price_y_pred"]  = y_pred
+
+    fig = make_regression_figure(model, X, y, X_test, y_test, y_pred)
+
+    summary = (
+        "📊 **Résultats du modèle**\n\n"
+        f"**Équation apprise** : Prix = {metrics['coef']:.2f} × Surface + {metrics['intercept']:.1f} k€\n"
+        f"*(Relation réelle : 2.50 × Surface + 50.0)*\n\n"
+        f"| Métrique | Train | Test |\n"
+        f"|---------|-------|------|\n"
+        f"| R²      | {metrics['R²_train']:.3f} | {metrics['R²_test']:.3f} |\n"
+        f"| RMSE (k€)| {metrics['RMSE_train']:.1f} | {metrics['RMSE_test']:.1f} |\n"
+        f"| MAE  (k€)| {metrics['MAE_train']:.1f} | {metrics['MAE_test']:.1f} |\n\n"
+        f"Entraîné sur {metrics['n_train']} exemples, testé sur {metrics['n_test']}."
+    )
+    return st, fig, summary
+
+
+def price_predict_cb(surface: float, state: dict):
+    """Prédit le prix pour une surface donnée."""
+    model = state.get("price_model")
+    if model is None:
+        return state, None, "⚠️ Entraîner le modèle d'abord."
+
+    price = predict_price(model, float(surface))
+    X = state["price_X"]
+    y = state["price_y"]
+    X_test = state["price_X_test"]
+    y_test = state["price_y_test"]
+    y_pred = state["price_y_pred"]
+
+    fig = make_regression_figure(model, X, y, X_test, y_test, y_pred,
+                                 highlight_x=float(surface), highlight_y=price)
+    msg = f"🏠 Surface : {surface:.0f} m²  →  Prix estimé : **{price:.0f} k€** ({price*1000:.0f} €)"
+    return state, fig, msg
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  GRADIO UI
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1557,6 +1641,60 @@ def build_ui():
                         outputs=[cd_pred_msg, cd_pred_svm, cd_pred_rf,
                                  cd_pred_cnn, cd_pred_ensemble],
                     )
+
+            # ── TAB 7 : PRIX MAISON ───────────────────────────────────────────
+            with gr.TabItem("🏠 Prix Maison"):
+                gr.Markdown(
+                    "## Régression Linéaire — Prédiction de Prix Immobilier\n"
+                    "Prédit le **prix (k€)** d'une maison à partir de sa **surface (m²)** "
+                    "à l'aide d'une régression linéaire simple.\n\n"
+                    "**Relation réelle** : Prix = 2.5 × Surface + 50 + bruit gaussien"
+                )
+
+                with gr.Row():
+                    # ── Colonne gauche : Dataset ──────────────────────────────
+                    with gr.Column():
+                        gr.Markdown("### 1. Créer le dataset")
+                        price_n_slider    = gr.Slider(20, 500, value=100, step=10,
+                                                      label="Nombre d'exemples")
+                        price_noise_slider = gr.Slider(5, 100, value=30, step=5,
+                                                       label="Niveau de bruit (k€)")
+                        price_gen_btn     = gr.Button("Générer le dataset", variant="secondary")
+                        price_gen_status  = gr.Textbox(label="Statut", interactive=False, lines=5)
+                        price_dataset_plot = gr.Plot(label="Nuage de points")
+
+                    # ── Colonne droite : Entraînement ─────────────────────────
+                    with gr.Column():
+                        gr.Markdown("### 2. Entraîner le modèle")
+                        price_train_btn   = gr.Button("Entraîner la régression linéaire",
+                                                      variant="primary")
+                        price_metrics_md  = gr.Markdown("*Aucun modèle entraîné.*")
+                        price_reg_plot    = gr.Plot(label="Droite de régression + résidus")
+
+                gr.Markdown("### 3. Prédire le prix")
+                with gr.Row():
+                    price_surface_slider = gr.Slider(10, 300, value=100, step=5,
+                                                     label="Surface de la maison (m²)")
+                    price_pred_btn       = gr.Button("Prédire le prix", variant="primary",
+                                                     scale=1)
+                price_pred_result = gr.Markdown("*Entraînez d'abord le modèle.*")
+
+                # Événements
+                price_gen_btn.click(
+                    fn=price_generate_dataset_cb,
+                    inputs=[price_n_slider, price_noise_slider, state],
+                    outputs=[state, price_dataset_plot, price_gen_status],
+                )
+                price_train_btn.click(
+                    fn=price_train_cb,
+                    inputs=[price_n_slider, price_noise_slider, state],
+                    outputs=[state, price_reg_plot, price_metrics_md],
+                )
+                price_pred_btn.click(
+                    fn=price_predict_cb,
+                    inputs=[price_surface_slider, state],
+                    outputs=[state, price_reg_plot, price_pred_result],
+                )
 
             # ── TAB 6 : CHAT ──────────────────────────────────────────────────
             with gr.TabItem("Chat"):
