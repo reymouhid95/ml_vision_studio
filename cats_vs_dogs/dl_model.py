@@ -1,5 +1,5 @@
 """
-Approche DL — Transfer learning MobileNetV2 sur Chats vs Chiens.
+Approche DL — Transfer learning EfficientNetB0 sur Chats vs Chiens.
 
 Deux phases d'entraînement :
   Phase 1 — Base gelée (10 époques, lr=1e-3)
@@ -7,11 +7,12 @@ Deux phases d'entraînement :
     Rapide et stable : la base ImageNet est déjà excellente.
 
   Phase 2 — Fine-tuning (lr=1e-5, époques configurables)
-    Les 30 dernières couches de MobileNetV2 sont dégelées.
+    Les 30 dernières couches d'EfficientNetB0 sont dégelées.
     Le très faible taux d'apprentissage préserve les poids pré-entraînés.
 
-Le preprocessing (normalisation [0,1] → [-1,1]) est intégré dans le modèle
-via mobilenet_v2.preprocess_input, donc predict_dl reçoit simplement float32 [0,1].
+EfficientNetB0 intègre son propre preprocessing ([0,255] → normalisé),
+donc le modèle reçoit float32 [0,1] et une couche Rescaling(255) convertit
+avant d'entrer dans la base.
 """
 from __future__ import annotations
 
@@ -30,15 +31,16 @@ PATIENCE      = 5    # early stopping
 
 # ── Architecture ─────────────────────────────────────────────────────────────
 
-def build_transfer_model(img_size: int = 96):
+def build_transfer_model(img_size: int = 160):
     """
-    MobileNetV2 (ImageNet) + tête de classification.
+    EfficientNetB0 (ImageNet) + tête de classification.
     Retourne (model, base_model) pour pouvoir dégeler la base en phase 2.
-    Les images entrantes sont en float32 [0, 1] ; le preprocessing est intégré.
+    Les images entrantes sont en float32 [0, 1] ; la couche Rescaling
+    les convertit en [0, 255] avant de les passer à EfficientNetB0.
     """
     import tensorflow as tf
 
-    base = tf.keras.applications.MobileNetV2(
+    base = tf.keras.applications.EfficientNetB0(
         input_shape=(img_size, img_size, 3),
         include_top=False,
         weights="imagenet",
@@ -46,9 +48,8 @@ def build_transfer_model(img_size: int = 96):
     base.trainable = False   # Phase 1 : tout gelé
 
     inputs = tf.keras.Input(shape=(img_size, img_size, 3))
-    # [0,1] → [-1,1] (équivalent à mobilenet_v2.preprocess_input)
-    # Rescaling est une couche native : pas de problème de sérialisation.
-    x = tf.keras.layers.Rescaling(scale=2.0, offset=-1.0)(inputs)
+    # [0,1] → [0,255] (EfficientNetB0 intègre sa propre normalisation interne)
+    x = tf.keras.layers.Rescaling(scale=255.0)(inputs)
     x = base(x, training=False)
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dense(128, activation="relu")(x)

@@ -1,11 +1,3 @@
-"""
-ML Vision Studio — Python + Gradio
-Equivalent of index.html / app.js rewritten in Python.
-
-Run:
-  cd ml_vision_studio
-  python app.py
-"""
 from __future__ import annotations
 
 import copy
@@ -14,11 +6,6 @@ import os
 import ssl
 import sys
 import tempfile
-
-# Fix SSL certificate verification on Homebrew Python (macOS)
-# Homebrew Python doesn't install system CA certs; patch to use certifi's bundle.
-# - ssl patch:      covers urllib (Keras weight downloads)
-# - env vars:       covers requests + TensorFlow Hub downloads
 import certifi
 
 ssl._create_default_https_context = lambda: ssl.create_default_context(
@@ -27,9 +14,6 @@ ssl._create_default_https_context = lambda: ssl.create_default_context(
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 
-# Patch gradio_client — bug "additionalProperties: false" (booléen au lieu de dict)
-# get_type() et _json_schema_to_python_type() reçoivent parfois schema=False
-# → "argument of type 'bool' is not iterable". Appliqué ici pour couvrir local + Colab.
 try:
     import importlib, pathlib
     import gradio_client.utils as _gc_utils
@@ -52,9 +36,8 @@ try:
         _gc_path.write_text(_src)
         importlib.reload(_gc_utils)
 except Exception:
-    pass  # ne jamais bloquer le démarrage pour ça
+    pass
 
-# Support HEIC/HEIF (photos iPhone)
 try:
     import pillow_heif
     pillow_heif.register_heif_opener()
@@ -1585,7 +1568,7 @@ if __name__ == "__main__":
     demo.launch(
         server_name="127.0.0.1",
         server_port=7860,
-        inbrowser=False,   # ouvre le navigateur manuellement sur http://127.0.0.1:7860
+        inbrowser=False,  
         share=True,
         debug=True,
         show_error=True,

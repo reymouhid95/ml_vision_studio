@@ -11,12 +11,12 @@ from pathlib import Path
 import numpy as np
 
 DATA_DIR    = Path(__file__).parent / "data"
-IMG_SIZE    = 96       # résolution commune ML + DL
+IMG_SIZE    = 160      # résolution commune ML + DL (EfficientNetB0 natif 224, fonctionne à 160)
 CLASS_NAMES = ["chat", "chien"]   # label 0 = cat, 1 = dog dans cats_vs_dogs
 
 # Taille des splits par défaut
 # Le dataset complet a ~23 000 images ; 7 000 offre un bon compromis vitesse/précision.
-N_TRAIN = 5000
+N_TRAIN = 8000
 N_VAL   = 1000
 N_TEST  = 1000
 
