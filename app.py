@@ -6,6 +6,7 @@ import os
 import ssl
 import sys
 import tempfile
+
 import certifi
 
 ssl._create_default_https_context = lambda: ssl.create_default_context(
@@ -15,7 +16,9 @@ os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 
 try:
-    import importlib, pathlib
+    import importlib
+    import pathlib
+
     import gradio_client.utils as _gc_utils
     _gc_path = pathlib.Path(_gc_utils.__file__)
     _src = _gc_path.read_text()
@@ -54,8 +57,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from cats_vs_dogs.data_prep import CLASS_NAMES as CD_CLASS_NAMES
+from cats_vs_dogs.data_prep import IMG_SIZE as CD_IMG_SIZE
 from cats_vs_dogs.data_prep import (download_and_prepare, is_prepared,
-                                    load_split, split_counts, IMG_SIZE as CD_IMG_SIZE)
+                                    load_split, split_counts)
 from cats_vs_dogs.dl_model import model_trained as dl_model_trained
 from cats_vs_dogs.dl_model import predict_dl, train_dl_model
 from cats_vs_dogs.ml_model import models_trained as ml_models_trained
@@ -67,53 +71,37 @@ from core.audio_trainer import (extract_mel_features, predict_audio,
 from core.image_trainer import HP_BATCH_OPTS as IMG_BATCH_OPTS
 from core.image_trainer import HP_LR_OPTS as IMG_LR_OPTS
 from core.image_trainer import predict_image, train_image_model
+from core.price_predictor import (generate_dataset, make_dataset_figure,
+                                  make_regression_figure, predict_price,
+                                  train_price_model)
 from core.text_trainer import (build_knn_index, classify_knn, classify_with_nn,
                                embed_single, knn_leave_one_out,
                                split_text_into_chunks, train_text_nn_model)
 # Datasets de démo
-from datasets.flowers import (
-    download_and_prepare as flowers_download,
-    is_prepared as flowers_prepared,
-    load_all_as_image_classes as flowers_load,
-    sample_counts as flowers_counts,
-)
-from datasets.speech_commands import (
-    download_and_prepare as speech_download,
-    is_prepared as speech_prepared,
-    load_all_as_audio_classes as speech_load,
-    CLASS_NAMES as SPEECH_CLASS_NAMES,
-)
-from datasets.text_datasets import (
-    download_and_prepare as agnews_download,
-    is_prepared as agnews_prepared,
-    load_all_as_text_classes as agnews_load,
-    sample_counts as agnews_counts,
-)
-# Suggestions automatiques
-from utils.suggestions import (
-    analyze_class_balance,
-    analyze_training_results,
-    format_suggestions,
-)
-# Courbes d'apprentissage
-from utils.learning_curve import (
-    image_learning_curve,
-    audio_learning_curve,
-    text_learning_curve,
-    cats_dogs_learning_curve,
-)
+from datasets.flowers import download_and_prepare as flowers_download
+from datasets.flowers import is_prepared as flowers_prepared
+from datasets.flowers import load_all_as_image_classes as flowers_load
+from datasets.flowers import sample_counts as flowers_counts
+from datasets.speech_commands import CLASS_NAMES as SPEECH_CLASS_NAMES
+from datasets.speech_commands import download_and_prepare as speech_download
+from datasets.speech_commands import is_prepared as speech_prepared
+from datasets.speech_commands import load_all_as_audio_classes as speech_load
+from datasets.text_datasets import download_and_prepare as agnews_download
+from datasets.text_datasets import is_prepared as agnews_prepared
+from datasets.text_datasets import load_all_as_text_classes as agnews_load
+from datasets.text_datasets import sample_counts as agnews_counts
 from PIL import Image
 from utils.augmentation import augment_image
 from utils.confusion_matrix import make_confusion_figure
+# Courbes d'apprentissage
+from utils.learning_curve import (audio_learning_curve,
+                                  cats_dogs_learning_curve,
+                                  image_learning_curve, text_learning_curve)
 from utils.pdf_import import extract_pdf_page_images, extract_pdf_text
+# Suggestions automatiques
+from utils.suggestions import (analyze_class_balance, analyze_training_results,
+                               format_suggestions)
 from utils.url_import import fetch_url_text
-from core.price_predictor import (
-    generate_dataset,
-    train_price_model,
-    predict_price,
-    make_dataset_figure,
-    make_regression_figure,
-)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  STATE
