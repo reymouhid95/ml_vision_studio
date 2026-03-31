@@ -55,7 +55,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from cats_vs_dogs.data_prep import CLASS_NAMES as CD_CLASS_NAMES
 from cats_vs_dogs.data_prep import (download_and_prepare, is_prepared,
-                                    load_split, split_counts)
+                                    load_split, split_counts, IMG_SIZE as CD_IMG_SIZE)
 from cats_vs_dogs.dl_model import model_trained as dl_model_trained
 from cats_vs_dogs.dl_model import predict_dl, train_dl_model
 from cats_vs_dogs.ml_model import models_trained as ml_models_trained
@@ -944,23 +944,27 @@ def cd_train_dl(finetune_epochs: int, batch_size: int):
 
     log     = ""
     results = None
-    gen = train_dl_model(X_tr, y_tr, X_v, y_v, X_te, y_te,
-                         finetune_epochs=finetune_epochs, batch_size=batch_size)
-    for item in gen:
-        if item[0] == "phase":
-            _, num, p1, p2 = item
-            label = ("🔒 Base gelée" if num == 1
-                     else "🔓 Fine-tuning (top 30 couches)")
-            log += f"\n── Phase {num} — {label} ──\n"
-            yield log, None, None
-        elif item[0] == "epoch":
-            _, ep, total, tl, ta, vl, va = item
-            log += (f"Époque {ep:>3}/{total} — "
-                    f"loss {tl:.4f}  acc {ta:.3f}  "
-                    f"val_loss {vl:.4f}  val_acc {va:.3f}\n")
-            yield log, None, None
-        elif item[0] == "done":
-            results = item[1]
+    try:
+        gen = train_dl_model(X_tr, y_tr, X_v, y_v, X_te, y_te,
+                             finetune_epochs=finetune_epochs, batch_size=batch_size)
+        for item in gen:
+            if item[0] == "phase":
+                _, num, p1, p2 = item
+                label = ("🔒 Base gelée" if num == 1
+                         else "🔓 Fine-tuning (top 30 couches)")
+                log += f"\n── Phase {num} — {label} ──\n"
+                yield log, None, None
+            elif item[0] == "epoch":
+                _, ep, total, tl, ta, vl, va = item
+                log += (f"Époque {ep:>3}/{total} — "
+                        f"loss {tl:.4f}  acc {ta:.3f}  "
+                        f"val_loss {vl:.4f}  val_acc {va:.3f}\n")
+                yield log, None, None
+            elif item[0] == "done":
+                results = item[1]
+    except Exception as e:
+        yield log + f"\n❌ Erreur : {e}", None, None
+        return
 
     if results is None:
         yield log + "Erreur : pas de résultats.", None, None
@@ -980,8 +984,8 @@ def cd_predict(img):
     if img is None:
         return "Chargez une image.", None, None, None, None
 
-    # Normalisation PIL → float32 numpy [0,1]
-    pil = Image.fromarray(img).convert("RGB").resize((96, 96))
+    # Normalisation PIL → float32 numpy [0,1] à la résolution d'entraînement
+    pil = Image.fromarray(img).convert("RGB").resize((CD_IMG_SIZE, CD_IMG_SIZE))
     arr = np.array(pil, dtype=np.float32) / 255.0
 
     ml_status = ml_models_trained()
