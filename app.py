@@ -100,6 +100,7 @@ from utils.learning_curve import (
     image_learning_curve,
     audio_learning_curve,
     text_learning_curve,
+    cats_dogs_learning_curve,
 )
 from PIL import Image
 from utils.augmentation import augment_image
@@ -765,6 +766,14 @@ def txt_lc_cb(state: dict):
         return None, "Indexez d'abord les embeddings KNN."
     try:
         fig, diag = text_learning_curve(state["text_knn"], state["text_class_names"])
+        return fig, diag
+    except Exception as e:
+        return None, f"Erreur : {e}"
+
+
+def cd_lc_cb():
+    try:
+        fig, diag = cats_dogs_learning_curve()
         return fig, diag
     except Exception as e:
         return None, f"Erreur : {e}"
@@ -1485,9 +1494,9 @@ def build_ui():
                     )
 
                 # ── Approche DL ───────────────────────────────────────────────
-                with gr.Accordion("3. Approche DL — Transfer Learning MobileNetV2", open=False):
+                with gr.Accordion("3. Approche DL — Transfer Learning EfficientNetB0", open=False):
                     gr.Markdown(
-                        "**Base** : MobileNetV2 pré-entraîné ImageNet (gelé en phase 1)  \n"
+                        "**Base** : EfficientNetB0 pré-entraîné ImageNet (gelé en phase 1)  \n"
                         "**Tête** : GlobalAvgPool → Dense(128) → Dropout(0.3) → Softmax  \n"
                         "**Phase 1** (10 époques, lr=1e-3) — tête seule  \n"
                         "**Phase 2** (époques configurables, lr=1e-5) — fine-tuning top 30 couches  \n"
@@ -1506,6 +1515,22 @@ def build_ui():
                         fn=cd_train_dl,
                         inputs=[cd_dl_epochs, cd_dl_batch],
                         outputs=[cd_cnn_log, cd_cnn_curves, cd_cnn_cm],
+                    )
+
+                # ── Courbe d'apprentissage ─────────────────────────────────────
+                with gr.Accordion("📈 Courbe d'apprentissage", open=False):
+                    gr.Markdown(
+                        "Features EfficientNetB0 extraites une seule fois (batches 32) "
+                        "+ Régression Logistique sur fractions croissantes.  \n"
+                        "Nécessite que le dataset soit téléchargé."
+                    )
+                    cd_lc_btn  = gr.Button("Générer la courbe", variant="secondary")
+                    cd_lc_plot = gr.Plot(label="Courbe d'apprentissage")
+                    cd_lc_diag = gr.Textbox(label="Diagnostic", interactive=False, lines=4)
+                    cd_lc_btn.click(
+                        fn=cd_lc_cb,
+                        inputs=[],
+                        outputs=[cd_lc_plot, cd_lc_diag],
                     )
 
                 # ── Prédiction ────────────────────────────────────────────────

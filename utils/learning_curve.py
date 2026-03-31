@@ -339,3 +339,71 @@ def text_learning_curve(
     fig  = _lc_figure(sizes, train_accs, val_accs, "Courbe d'apprentissage — Texte (KNN)")
     diag = _diagnostic(train_accs, val_accs, n_classes)
     return fig, diag
+
+
+# ── Chats & Chiens ─────────────────────────────────────────────────────────────
+
+def cats_dogs_learning_curve(
+    n_points: int = 8,
+) -> tuple[plt.Figure | None, str]:
+    """
+    Courbe d'apprentissage Chats & Chiens.
+    Extrait les features EfficientNetB0 UNE fois (batches 32 → pas d'OOM),
+    puis entraîne une Régression Logistique sur des fractions croissantes.
+    Charge les splits depuis cats_vs_dogs/data/train.npz et val.npz.
+    """
+    import tensorflow as tf
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    from cats_vs_dogs.data_prep import is_prepared, load_split
+
+    if not is_prepared():
+        return None, "Dataset non préparé. Cliquez sur 'Télécharger le dataset'."
+
+    try:
+        X_train, y_train = load_split("train")
+        X_val,   y_val   = load_split("val")
+    except RuntimeError as e:
+        return None, str(e)
+
+    img_size = X_train.shape[1]
+    base = tf.keras.applications.EfficientNetB0(
+        input_shape=(img_size, img_size, 3),
+        include_top=False,
+        weights="imagenet",
+    )
+    pool = tf.keras.layers.GlobalAveragePooling2D()
+
+    def _extract(X: np.ndarray) -> np.ndarray:
+        feat_list = []
+        for i in range(0, len(X), 32):
+            batch = X[i:i + 32] * 255.0   # [0,1] → [0,255] pour EfficientNetB0
+            feat_list.append(pool(base(batch, training=False)).numpy())
+        return np.concatenate(feat_list, axis=0)
+
+    feats_tr  = _extract(X_train)
+    feats_val = _extract(X_val)
+
+    n_train   = len(feats_tr)
+    n_classes = 2
+
+    clf = Pipeline([
+        ("sc", StandardScaler()),
+        ("lr", LogisticRegression(max_iter=300, C=1.0, random_state=0)),
+    ])
+
+    fracs = np.linspace(1 / n_points, 1.0, n_points)
+    sizes, train_accs, val_accs = [], [], []
+
+    for frac in fracs:
+        n_use = max(n_classes, int(n_train * frac))
+        clf.fit(feats_tr[:n_use], y_train[:n_use])
+        sizes.append(n_use)
+        train_accs.append(float((clf.predict(feats_tr[:n_use]) == y_train[:n_use]).mean()))
+        val_accs.append(float((clf.predict(feats_val) == y_val).mean()))
+
+    fig  = _lc_figure(sizes, train_accs, val_accs,
+                      "Courbe d'apprentissage — Chats & Chiens (EfficientNetB0)")
+    diag = _diagnostic(train_accs, val_accs, n_classes)
+    return fig, diag
