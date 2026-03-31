@@ -255,12 +255,12 @@ prix = 2.5 × surface + 50 + bruit_gaussien(σ = noise_level)
 
 Exemples concrets (`n=100`, `noise_level=30 k€`) :
 
-| Surface | Formule exacte | Fourchette réelle (±1σ) |
-|---------|---------------|--------------------------|
-| 30 m²   | 2.5×30+50 = **125 k€** | 95–155 k€ |
-| 80 m²   | 2.5×80+50 = **250 k€** | 220–280 k€ |
-| 120 m²  | 2.5×120+50 = **350 k€** | 320–380 k€ |
-| 200 m²  | 2.5×200+50 = **550 k€** | 520–580 k€ |
+| Surface | Formule exacte          | Fourchette réelle (±1σ) |
+| ------- | ----------------------- | ----------------------- |
+| 30 m²   | 2.5×30+50 = **125 k€**  | 95–155 k€               |
+| 80 m²   | 2.5×80+50 = **250 k€**  | 220–280 k€              |
+| 120 m²  | 2.5×120+50 = **350 k€** | 320–380 k€              |
+| 200 m²  | 2.5×200+50 = **550 k€** | 520–580 k€              |
 
 Le bruit (σ=30 k€ par défaut) simule les facteurs réels non capturés
 (localisation, état du bien, étage, exposition).
@@ -279,13 +279,14 @@ et à la taille limitée du dataset.
 
 #### Métriques d'évaluation
 
-| Métrique | Formule | Interprétation | Valeur typique |
-|----------|---------|----------------|----------------|
-| **R²** | `1 - SS_res / SS_tot` | Part de la variance expliquée. 1.0 = parfait, 0.0 = inutile | ~0.97 |
-| **RMSE** | `√(Σ(ŷ−y)²/n)` | Erreur en k€, pénalise les gros écarts | ~30 k€ |
-| **MAE** | `Σ|ŷ−y|/n` | Erreur absolue moyenne, robuste aux outliers | ~24 k€ |
+| Métrique | Formule               | Interprétation                                              | Valeur typique |
+| -------- | --------------------- | ----------------------------------------------------------- | -------------- | -------------------------------------------- | ------ |
+| **R²**   | `1 - SS_res / SS_tot` | Part de la variance expliquée. 1.0 = parfait, 0.0 = inutile | ~0.97          |
+| **RMSE** | `√(Σ(ŷ−y)²/n)`        | Erreur en k€, pénalise les gros écarts                      | ~30 k€         |
+| **MAE**  | `Σ                    | ŷ−y                                                         | /n`            | Erreur absolue moyenne, robuste aux outliers | ~24 k€ |
 
 Lecture concrète d'un résultat R²=0.97, RMSE=30 k€, MAE=24 k€ :
+
 - 97% des variations de prix sont expliquées par la surface
 - En moyenne, l'erreur de prédiction est de ±30 000 €
 - La moitié des prédictions sont à moins de 24 000 € du vrai prix
@@ -293,6 +294,7 @@ Lecture concrète d'un résultat R²=0.97, RMSE=30 k€, MAE=24 k€ :
 #### Graphe des résidus
 
 Le sous-graphe "Résidus vs Prédiction" vérifie les hypothèses du modèle :
+
 - **Nuage aléatoire autour de 0** → modèle bien spécifié ✓
 - **Entonnoir** (résidus croissent avec ŷ) → hétéroscédasticité, il faudrait transformer y
 - **Courbe** → relation non-linéaire non capturée → essayer regression polynomiale
@@ -325,15 +327,15 @@ reconnaître les chiffres manuscrits 0–9 du dataset MNIST.
 
 #### Dataset MNIST
 
-| Propriété | Valeur |
-|-----------|--------|
-| Source | Yann LeCun, AT&T Bell Labs (1998) |
-| Images train | 60 000 |
-| Images test | 10 000 |
-| Résolution | 28×28 pixels |
-| Couleurs | Niveaux de gris (1 canal) |
-| Classes | 10 (chiffres 0–9) |
-| Précision humaine | ~98.5% |
+| Propriété         | Valeur                            |
+| ----------------- | --------------------------------- |
+| Source            | Yann LeCun, AT&T Bell Labs (1998) |
+| Images train      | 60 000                            |
+| Images test       | 10 000                            |
+| Résolution        | 28×28 pixels                      |
+| Couleurs          | Niveaux de gris (1 canal)         |
+| Classes           | 10 (chiffres 0–9)                 |
+| Précision humaine | ~98.5%                            |
 
 Chaque pixel va de 0 (noir) à 255 (blanc), divisé par 255 avant de
 passer dans le réseau → valeurs dans [0, 1].
@@ -383,11 +385,11 @@ Après entraînement :
 #### Performances par nombre d'époques
 
 | Époques | Précision test | Temps (CPU) |
-|---------|---------------|-------------|
-| 1       | ~97.5%        | ~90 s       |
-| 3       | ~98.5%        | ~4 min      |
-| 5       | ~99.0%        | ~7 min      |
-| 10      | ~99.2%        | ~14 min     |
+| ------- | -------------- | ----------- |
+| 1       | ~97.5%         | ~90 s       |
+| 3       | ~98.5%         | ~4 min      |
+| 5       | ~99.0%         | ~7 min      |
+| 10      | ~99.2%         | ~14 min     |
 
 Sur 10 000 chiffres test, 99% de précision = **9 900 chiffres reconnus**,
 seuls 100 sont des erreurs.
@@ -419,12 +421,12 @@ Image 28×28 : fond noir (0.0), traits blancs (0.8–1.0)
 
 Certaines paires de chiffres se ressemblent visuellement :
 
-| Chiffre réel | Parfois prédit | Raison |
-|-------------|----------------|--------|
-| 4 | 9 | Même boucle fermée en haut |
-| 3 | 8 | Arcs similaires (le 8 est un 3 fermé) |
-| 1 | 7 | Trait vertical prédominant |
-| 5 | 6 | Courbe inférieure similaire |
+| Chiffre réel | Parfois prédit | Raison                                |
+| ------------ | -------------- | ------------------------------------- |
+| 4            | 9              | Même boucle fermée en haut            |
+| 3            | 8              | Arcs similaires (le 8 est un 3 fermé) |
+| 1            | 7              | Trait vertical prédominant            |
+| 5            | 6              | Courbe inférieure similaire           |
 
 La matrice 10×10 affichée après l'entraînement montre exactement
 combien d'exemples de chaque classe tombent dans chaque prédiction.

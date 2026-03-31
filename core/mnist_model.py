@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Generator
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 from PIL import Image
 
 DARK_BG  = "#1a1a2e"
