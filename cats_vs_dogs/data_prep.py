@@ -78,23 +78,27 @@ def download_and_prepare(
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    total = n_train + n_val + n_test
+    # Collecte équilibrée : exactement n_per_class images par classe
+    n_per_class = (n_train + n_val + n_test) // 2
 
     ds = tfds.load(
         "cats_vs_dogs",
-        split=f"train[:{total}]",
+        split="train",          # itère tout le dataset ; on s'arrête dès qu'on a assez
         as_supervised=True,
         shuffle_files=True,
     )
 
-    imgs, lbls = [], []
+    buckets: dict[int, list] = {0: [], 1: []}
     for img, lbl in ds:
-        img_r = tf.image.resize(img, [IMG_SIZE, IMG_SIZE])
-        imgs.append(tf.cast(img_r, tf.float32).numpy() / 255.0)
-        lbls.append(int(lbl.numpy()))
+        cls = int(lbl.numpy())
+        if len(buckets[cls]) < n_per_class:
+            img_r = tf.image.resize(img, [IMG_SIZE, IMG_SIZE])
+            buckets[cls].append(tf.cast(img_r, tf.float32).numpy() / 255.0)
+        if all(len(v) >= n_per_class for v in buckets.values()):
+            break
 
-    imgs = np.array(imgs, dtype=np.float32)
-    lbls = np.array(lbls, dtype=np.int32)
+    imgs = np.array(buckets[0] + buckets[1], dtype=np.float32)
+    lbls = np.array([0] * len(buckets[0]) + [1] * len(buckets[1]), dtype=np.int32)
 
     # Mélange reproductible
     rng  = np.random.default_rng(42)
