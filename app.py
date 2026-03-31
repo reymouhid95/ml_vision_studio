@@ -74,6 +74,10 @@ from core.image_trainer import predict_image, train_image_model
 from core.price_predictor import (generate_dataset, make_dataset_figure,
                                   make_regression_figure, predict_price,
                                   train_price_model)
+from core.mnist_model import (
+    load_mnist, train_cnn_model, evaluate_cnn, predict_digit,
+    make_sample_grid, make_training_curves, make_confusion_10,
+)
 from core.text_trainer import (build_knn_index, classify_knn, classify_with_nn,
                                embed_single, knn_leave_one_out,
                                split_text_into_chunks, train_text_nn_model)
@@ -134,6 +138,13 @@ def make_initial_state() -> dict:
         "price_X_test":      None,
         "price_y_test":      None,
         "price_y_pred":      None,
+        # MNIST
+        "mnist_X_train":     None,
+        "mnist_y_train":     None,
+        "mnist_X_test":      None,
+        "mnist_y_test":      None,
+        "mnist_model":       None,
+        "mnist_trained":     False,
     }
 
 
@@ -1096,6 +1107,106 @@ def price_predict_cb(surface: float, state: dict):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  MNIST — CALLBACKS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def mnist_load_cb(state: dict):
+    """Charge le dataset MNIST et affiche une grille d'exemples."""
+    try:
+        (X_train, y_train), (X_test, y_test) = load_mnist()
+    except Exception as e:
+        return state, None, f"Erreur lors du chargement : {e}"
+
+    st = _s(state)
+    st["mnist_X_train"] = X_train
+    st["mnist_y_train"] = y_train
+    st["mnist_X_test"]  = X_test
+    st["mnist_y_test"]  = y_test
+
+    fig = make_sample_grid(X_train, y_train, n=20)
+    msg = (
+        f"✓ MNIST chargé\n"
+        f"  Train : {len(X_train):,} images\n"
+        f"  Test  : {len(X_test):,} images\n"
+        f"  Classes : 10 chiffres (0–9)\n"
+        f"  Format  : 28×28 pixels, niveaux de gris"
+    )
+    return st, fig, msg
+
+
+def mnist_train_cb(epochs, batch_size, lr, state: dict, progress=gr.Progress()):
+    """Generator : entraîne le CNN et streame log + courbes en temps réel."""
+    X_train = state.get("mnist_X_train")
+    if X_train is None:
+        yield state, "⚠️ Chargez d'abord le dataset.", None, None, ""
+        return
+
+    X_test  = state["mnist_X_test"]
+    y_train = state["mnist_y_train"]
+    y_test  = state["mnist_y_test"]
+
+    log_lines: list[str] = []
+
+    for update in train_cnn_model(
+        X_train, y_train, X_test, y_test,
+        epochs=epochs, batch_size=batch_size, lr=lr,
+    ):
+        tag = update[0]
+        if tag == "epoch":
+            _, ep, total, loss, acc, val_loss, val_acc = update
+            progress(ep / total, desc=f"Époque {ep}/{total}")
+            log_lines.append(
+                f"[{ep:3d}/{total}]  perte={loss:.4f}  acc={acc:.2%}"
+                f"  │  val_perte={val_loss:.4f}  val_acc={val_acc:.2%}"
+            )
+            yield state, "\n".join(log_lines[-20:]), None, None, ""
+
+        elif tag == "done":
+            _, model, history = update
+            # Évaluation complète sur le jeu test
+            eval_res = evaluate_cnn(model, X_test, y_test)
+            cm_fig   = make_confusion_10(eval_res["preds"], eval_res["actuals"])
+            curve_fig = make_training_curves(history)
+
+            st = _s(state)
+            st["mnist_model"]   = model
+            st["mnist_trained"] = True
+
+            test_acc = eval_res["test_acc"]
+            log_lines.append(
+                f"✓ Entraînement terminé — Précision test : {test_acc:.2%}"
+            )
+            summary = (
+                f"## Résultats\n\n"
+                f"| Métrique   | Valeur |\n"
+                f"|------------|--------|\n"
+                f"| Précision test | **{test_acc:.2%}** |\n"
+                f"| Perte test     | {eval_res['test_loss']:.4f} |\n"
+                f"| Images test    | {len(X_test):,} |\n\n"
+                f"*Référence : un CNN standard atteint ~99% sur MNIST.*"
+            )
+            yield st, "\n".join(log_lines[-20:]), curve_fig, cm_fig, summary
+
+
+def mnist_predict_cb(sketch, state: dict):
+    """Prédit le chiffre dessiné ou uploaded."""
+    model = state.get("mnist_model")
+    if model is None:
+        return None, "⚠️ Entraînez d'abord le modèle."
+    if sketch is None:
+        return None, "⚠️ Dessinez ou importez un chiffre."
+
+    result = predict_digit(model, sketch)
+    if result is None:
+        return None, "⚠️ Image non reconnue. Vérifiez le canvas."
+
+    pred, probs = result
+    bar = {str(k): v for k, v in sorted(probs.items(), key=lambda x: -x[1])}
+    msg = f"Chiffre détecté : **{pred}** (confiance : {probs[str(pred)]:.1%})"
+    return bar, msg
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  GRADIO UI
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1682,6 +1793,84 @@ def build_ui():
                     fn=price_predict_cb,
                     inputs=[price_surface_slider, state],
                     outputs=[state, price_reg_plot, price_pred_result],
+                )
+
+            # ── TAB 8 : CHIFFRES MNIST ────────────────────────────────────────
+            with gr.TabItem("🔢 Chiffres MNIST"):
+                gr.Markdown(
+                    "## Reconnaissance de Chiffres Manuscrits — Deep Learning (CNN)\n"
+                    "Un réseau de neurones convolutif classifie les chiffres 0–9 "
+                    "du dataset **MNIST** (70 000 images 28×28).  \n"
+                    "Architecture : Conv2D(32) → Conv2D(64) → MaxPool → Dense(128) → Softmax"
+                )
+
+                with gr.Row():
+                    # ── Colonne gauche : Données + Entraînement ───────────────
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 1. Charger les données")
+                        mnist_load_btn    = gr.Button("Charger MNIST", variant="secondary")
+                        mnist_load_status = gr.Textbox(label="Statut", interactive=False, lines=6)
+                        mnist_sample_plot = gr.Plot(label="Exemples MNIST")
+
+                        gr.Markdown("### 2. Entraîner le CNN")
+                        with gr.Row():
+                            mnist_epochs_sl = gr.Slider(1, 20, value=5, step=1,
+                                                        label="Époques")
+                            mnist_batch_sl  = gr.Slider(32, 256, value=128, step=32,
+                                                        label="Batch size")
+                        mnist_lr_radio = gr.Radio(
+                            [0.0001, 0.0005, 0.001, 0.005],
+                            value=0.001, label="Taux d'apprentissage",
+                        )
+                        mnist_train_btn   = gr.Button("Entraîner le CNN", variant="primary")
+                        mnist_train_log   = gr.Textbox(label="Log", interactive=False,
+                                                       lines=10)
+
+                    # ── Colonne droite : Résultats ────────────────────────────
+                    with gr.Column(scale=1):
+                        gr.Markdown("### Résultats")
+                        mnist_summary_md  = gr.Markdown("*Entraînez le modèle pour voir les résultats.*")
+                        mnist_curves_plot = gr.Plot(label="Courbes train / test")
+                        mnist_cm_plot     = gr.Plot(label="Matrice de confusion (10×10)")
+
+                gr.Markdown("### 3. Prédire un chiffre")
+                gr.Markdown(
+                    "Dessinez un chiffre dans le canvas ci-dessous "
+                    "(trait blanc sur fond noir, comme MNIST), ou importez une image."
+                )
+                with gr.Row():
+                    mnist_sketch = gr.Sketchpad(
+                        label="Dessinez un chiffre ici",
+                        type="pil",
+                        canvas_size=(280, 280),
+                        brush=gr.Brush(colors=["#ffffff"], color_mode="fixed",
+                                       default_size=24),
+                        layers=False,
+                        height=320,
+                    )
+                    with gr.Column():
+                        mnist_pred_btn    = gr.Button("Reconnaître le chiffre",
+                                                      variant="primary")
+                        mnist_pred_result = gr.Markdown("*Dessinez puis cliquez.*")
+                        mnist_pred_label  = gr.Label(label="Probabilités par classe",
+                                                     num_top_classes=10)
+
+                # Événements
+                mnist_load_btn.click(
+                    fn=mnist_load_cb,
+                    inputs=[state],
+                    outputs=[state, mnist_sample_plot, mnist_load_status],
+                )
+                mnist_train_btn.click(
+                    fn=mnist_train_cb,
+                    inputs=[mnist_epochs_sl, mnist_batch_sl, mnist_lr_radio, state],
+                    outputs=[state, mnist_train_log, mnist_curves_plot,
+                             mnist_cm_plot, mnist_summary_md],
+                )
+                mnist_pred_btn.click(
+                    fn=mnist_predict_cb,
+                    inputs=[mnist_sketch, state],
+                    outputs=[mnist_pred_label, mnist_pred_result],
                 )
 
             # ── TAB 6 : CHAT ──────────────────────────────────────────────────
