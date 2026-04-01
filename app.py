@@ -100,7 +100,8 @@ from utils.confusion_matrix import make_confusion_figure
 # Courbes d'apprentissage
 from utils.learning_curve import (audio_learning_curve,
                                   cats_dogs_learning_curve,
-                                  image_learning_curve, text_learning_curve)
+                                  image_learning_curve, text_learning_curve,
+                                  price_learning_curve, mnist_learning_curve)
 from utils.pdf_import import extract_pdf_page_images, extract_pdf_text
 # Suggestions automatiques
 from utils.suggestions import (analyze_class_balance, analyze_training_results,
@@ -616,10 +617,6 @@ def txt_load_json(file_obj, state: dict):
         return state, f"Erreur chargement JSON : {e}", None, _text_summary(state)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  DATASET DE DÉMO CALLBACKS
-# ─────────────────────────────────────────────────────────────────────────────
-
 # ── tf_flowers (Image) ────────────────────────────────────────────────────────
 
 def flowers_status_str() -> str:
@@ -1106,6 +1103,15 @@ def price_predict_cb(surface: float, state: dict):
     return state, fig, msg
 
 
+def price_lc_cb(n_samples: float, noise_level: float, state: dict):
+    """Courbe d'apprentissage — régression linéaire (R²)."""
+    model = state.get("price_model")
+    if model is None:
+        return None, "⚠️ Entraînez d'abord le modèle pour générer la courbe."
+    fig, diag = price_learning_curve(int(n_samples), float(noise_level))
+    return fig, diag
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  MNIST — CALLBACKS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1204,6 +1210,18 @@ def mnist_predict_cb(sketch, state: dict):
     bar = {str(k): v for k, v in sorted(probs.items(), key=lambda x: -x[1])}
     msg = f"Chiffre détecté : **{pred}** (confiance : {probs[str(pred)]:.1%})"
     return bar, msg
+
+
+def mnist_lc_cb(state: dict):
+    """Courbe d'apprentissage MNIST (Régression Logistique sklearn, ~20s)."""
+    X_train = state.get("mnist_X_train")
+    if X_train is None:
+        return None, "⚠️ Chargez d'abord le dataset MNIST."
+    fig, diag = mnist_learning_curve(
+        X_train, state["mnist_y_train"],
+        state["mnist_X_test"], state["mnist_y_test"],
+    )
+    return fig, diag
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1771,12 +1789,25 @@ def build_ui():
                         price_reg_plot    = gr.Plot(label="Droite de régression + résidus")
 
                 gr.Markdown("### 3. Prédire le prix")
-                with gr.Row():
-                    price_surface_slider = gr.Slider(10, 300, value=100, step=5,
-                                                     label="Surface de la maison (m²)")
-                    price_pred_btn       = gr.Button("Prédire le prix", variant="primary",
-                                                     scale=1)
+                gr.Markdown(
+                    "Bougez le curseur — la prédiction se met à jour **en temps réel** "
+                    "dès que le modèle est entraîné."
+                )
+                price_surface_slider = gr.Slider(10, 300, value=100, step=5,
+                                                 label="Surface de la maison (m²)")
                 price_pred_result = gr.Markdown("*Entraînez d'abord le modèle.*")
+
+                # ── Courbe d'apprentissage ─────────────────────────────────────
+                with gr.Accordion("📈 Courbe d'apprentissage (R²)", open=False):
+                    gr.Markdown(
+                        "Entraîne la régression sur des fractions croissantes du dataset "
+                        "(10 % → 100 %).  \n"
+                        "Mesure le **score R²** sur train et validation — rapide (~0.1 s).  \n"
+                        "Nécessite que le modèle ait été entraîné au moins une fois."
+                    )
+                    price_lc_btn  = gr.Button("Générer la courbe", variant="secondary")
+                    price_lc_plot = gr.Plot(label="Courbe d'apprentissage — R²")
+                    price_lc_diag = gr.Textbox(label="Diagnostic", interactive=False, lines=5)
 
                 # Événements
                 price_gen_btn.click(
@@ -1789,10 +1820,16 @@ def build_ui():
                     inputs=[price_n_slider, price_noise_slider, state],
                     outputs=[state, price_reg_plot, price_metrics_md],
                 )
-                price_pred_btn.click(
+                # Prédiction en temps réel à chaque mouvement du slider
+                price_surface_slider.change(
                     fn=price_predict_cb,
                     inputs=[price_surface_slider, state],
                     outputs=[state, price_reg_plot, price_pred_result],
+                )
+                price_lc_btn.click(
+                    fn=price_lc_cb,
+                    inputs=[price_n_slider, price_noise_slider, state],
+                    outputs=[price_lc_plot, price_lc_diag],
                 )
 
             # ── TAB 8 : CHIFFRES MNIST ────────────────────────────────────────
@@ -1800,17 +1837,41 @@ def build_ui():
                 gr.Markdown(
                     "## Reconnaissance de Chiffres Manuscrits — Deep Learning (CNN)\n"
                     "Un réseau de neurones convolutif classifie les chiffres 0–9 "
-                    "du dataset **MNIST** (70 000 images 28×28).  \n"
-                    "Architecture : Conv2D(32) → Conv2D(64) → MaxPool → Dense(128) → Softmax"
+                    "du dataset **MNIST** (70 000 images 28×28, niveaux de gris)."
                 )
+
+                # ── Architecture (accordéon pédagogique) ──────────────────────
+                with gr.Accordion("🏗️ Architecture du CNN", open=False):
+                    gr.Markdown(
+                        "```\n"
+                        "Input (28×28×1)\n"
+                        "  │\n"
+                        "  ├─ Conv2D(32 filtres, 3×3, relu, padding=same)\n"
+                        "  ├─ Conv2D(64 filtres, 3×3, relu, padding=same)\n"
+                        "  ├─ MaxPooling2D(2×2)        ← réduit à 14×14\n"
+                        "  ├─ Dropout(0.25)            ← régularisation\n"
+                        "  ├─ Flatten                  ← 64×14×14 = 12 544 valeurs\n"
+                        "  ├─ Dense(128, relu)\n"
+                        "  ├─ Dropout(0.40)\n"
+                        "  └─ Dense(10, softmax)       ← 10 probabilités (0–9)\n"
+                        "```\n\n"
+                        "**Optimiseur** : Adam  |  "
+                        "**Perte** : sparse categorical cross-entropy  |  "
+                        "**Précision attendue** : ~99 % en 5 époques"
+                    )
 
                 with gr.Row():
                     # ── Colonne gauche : Données + Entraînement ───────────────
                     with gr.Column(scale=1):
                         gr.Markdown("### 1. Charger les données")
-                        mnist_load_btn    = gr.Button("Charger MNIST", variant="secondary")
-                        mnist_load_status = gr.Textbox(label="Statut", interactive=False, lines=6)
-                        mnist_sample_plot = gr.Plot(label="Exemples MNIST")
+                        with gr.Row():
+                            mnist_load_btn     = gr.Button("Charger MNIST",
+                                                           variant="secondary", scale=2)
+                            mnist_load_train_btn = gr.Button("⚡ Charger et entraîner",
+                                                             variant="primary", scale=3)
+                        mnist_load_status  = gr.Textbox(label="Statut", interactive=False,
+                                                        lines=6)
+                        mnist_sample_plot  = gr.Plot(label="Exemples MNIST")
 
                         gr.Markdown("### 2. Entraîner le CNN")
                         with gr.Row():
@@ -1822,21 +1883,24 @@ def build_ui():
                             [0.0001, 0.0005, 0.001, 0.005],
                             value=0.001, label="Taux d'apprentissage",
                         )
-                        mnist_train_btn   = gr.Button("Entraîner le CNN", variant="primary")
-                        mnist_train_log   = gr.Textbox(label="Log", interactive=False,
-                                                       lines=10)
+                        mnist_train_btn  = gr.Button("Entraîner le CNN", variant="primary")
+                        mnist_train_log  = gr.Textbox(label="Log d'entraînement",
+                                                      interactive=False, lines=10)
 
                     # ── Colonne droite : Résultats ────────────────────────────
                     with gr.Column(scale=1):
                         gr.Markdown("### Résultats")
-                        mnist_summary_md  = gr.Markdown("*Entraînez le modèle pour voir les résultats.*")
+                        mnist_summary_md  = gr.Markdown(
+                            "*Entraînez le modèle pour voir les résultats.*"
+                        )
                         mnist_curves_plot = gr.Plot(label="Courbes train / test")
                         mnist_cm_plot     = gr.Plot(label="Matrice de confusion (10×10)")
 
+                # ── Prédiction ────────────────────────────────────────────────
                 gr.Markdown("### 3. Prédire un chiffre")
                 gr.Markdown(
-                    "Dessinez un chiffre dans le canvas ci-dessous "
-                    "(trait blanc sur fond noir, comme MNIST), ou importez une image."
+                    "Dessinez un chiffre (trait **blanc** sur fond **noir**, style MNIST) "
+                    "ou importez une image. Cliquez sur **Reconnaître**."
                 )
                 with gr.Row():
                     mnist_sketch = gr.Sketchpad(
@@ -1855,6 +1919,21 @@ def build_ui():
                         mnist_pred_label  = gr.Label(label="Probabilités par classe",
                                                      num_top_classes=10)
 
+                # ── Courbe d'apprentissage ─────────────────────────────────────
+                with gr.Accordion("📈 Courbe d'apprentissage", open=False):
+                    gr.Markdown(
+                        "Entraîne une **Régression Logistique** sklearn sur des fractions "
+                        "croissantes des données MNIST (pixels 28×28 aplatis).  \n"
+                        "Utilise 10 000 exemples max pour rester rapide (~20 secondes).  \n"
+                        "Illustre la dynamique train/val et le seuil de saturation.  \n"
+                        "Nécessite que le dataset soit chargé."
+                    )
+                    mnist_lc_btn  = gr.Button("Générer la courbe (~20 s)",
+                                              variant="secondary")
+                    mnist_lc_plot = gr.Plot(label="Courbe d'apprentissage — MNIST")
+                    mnist_lc_diag = gr.Textbox(label="Diagnostic", interactive=False,
+                                               lines=5)
+
                 # Événements
                 mnist_load_btn.click(
                     fn=mnist_load_cb,
@@ -1867,10 +1946,26 @@ def build_ui():
                     outputs=[state, mnist_train_log, mnist_curves_plot,
                              mnist_cm_plot, mnist_summary_md],
                 )
+                # Bouton "Charger et entraîner" — chaîne les deux opérations
+                mnist_load_train_btn.click(
+                    fn=mnist_load_cb,
+                    inputs=[state],
+                    outputs=[state, mnist_sample_plot, mnist_load_status],
+                ).then(
+                    fn=mnist_train_cb,
+                    inputs=[mnist_epochs_sl, mnist_batch_sl, mnist_lr_radio, state],
+                    outputs=[state, mnist_train_log, mnist_curves_plot,
+                             mnist_cm_plot, mnist_summary_md],
+                )
                 mnist_pred_btn.click(
                     fn=mnist_predict_cb,
                     inputs=[mnist_sketch, state],
                     outputs=[mnist_pred_label, mnist_pred_result],
+                )
+                mnist_lc_btn.click(
+                    fn=mnist_lc_cb,
+                    inputs=[state],
+                    outputs=[mnist_lc_plot, mnist_lc_diag],
                 )
 
             # ── TAB 6 : CHAT ──────────────────────────────────────────────────
