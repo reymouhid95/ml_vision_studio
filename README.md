@@ -60,7 +60,7 @@ ml_vision_studio/
 venv/bin/pip install llvmlite==0.43.0 numba==0.60.0
 
 # 3. Installer les dépendances
-venv/bin/pip install -r requirements.txt
+  venv/bin/pip install -r requirements.txt
 
 # 4. Patcher gradio_client (bug schema bool)
 #    Voir section "Corrections connues" ci-dessous

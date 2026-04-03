@@ -1,10 +1,58 @@
 from __future__ import annotations
 
+import os
+import site
+import sys
+
+
+# ── CUDA 11.8 via wheels pip (nvidia-*-cu11) pour Quadro M2000M Maxwell ──────
+# TF 2.14 inclut des kernels pré-compilés pour sm_50/sm_52 (Maxwell CC 5.x).
+# Le linker dynamique doit connaître les chemins .so avant le démarrage du
+# processus → on re-exécute si LD_LIBRARY_PATH n'est pas encore configuré.
+def _setup_cuda_and_reexec() -> None:
+    sp = next((p for p in site.getsitepackages() if "site-packages" in p), None)
+    if sp is None:
+        return
+    nvidia_root = os.path.join(sp, "nvidia")
+    if not os.path.isdir(nvidia_root):
+        return
+    lib_dirs = [
+        os.path.join(nvidia_root, pkg, "lib")
+        for pkg in os.listdir(nvidia_root)
+        if os.path.isdir(os.path.join(nvidia_root, pkg, "lib"))
+    ]
+    if not lib_dirs:
+        return
+    new_paths = ":".join(lib_dirs)
+    current = os.environ.get("LD_LIBRARY_PATH", "")
+    if new_paths not in current:
+        os.environ["LD_LIBRARY_PATH"] = new_paths + (":" + current if current else "")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+# Supprime les logs verbeux TensorFlow/CUDA AVANT le re-exec
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+
+_setup_cuda_and_reexec()
+
+# ── libdevice.10.bc requis par XLA pour compiler les kernels GPU (Maxwell) ────
+def _set_xla_libdevice() -> None:
+    import site as _site
+    sp = next((p for p in _site.getsitepackages() if "site-packages" in p), None)
+    if sp is None:
+        return
+    libdevice = os.path.join(sp, "nvidia", "cuda_nvcc", "nvvm", "libdevice")
+    if os.path.isdir(libdevice):
+        xla = os.environ.get("XLA_FLAGS", "")
+        flag = f"--xla_gpu_cuda_data_dir={libdevice}"
+        if flag not in xla:
+            os.environ["XLA_FLAGS"] = (xla + " " + flag).strip()
+
+_set_xla_libdevice()
+
 import copy
 import json
-import os
 import ssl
-import sys
 import tempfile
 
 import certifi
@@ -56,6 +104,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
+
 from cats_vs_dogs.data_prep import CLASS_NAMES as CD_CLASS_NAMES
 from cats_vs_dogs.data_prep import IMG_SIZE as CD_IMG_SIZE
 from cats_vs_dogs.data_prep import (download_and_prepare, is_prepared,
@@ -68,16 +118,24 @@ from core.audio_trainer import HP_BATCH_OPTS as AUD_BATCH_OPTS
 from core.audio_trainer import HP_LR_OPTS as AUD_LR_OPTS
 from core.audio_trainer import (extract_mel_features, predict_audio,
                                 train_audio_model)
+from core.clustering import (flatten, make_elbow_figure, make_tsne_figure,
+                             run_elbow, run_kmeans, run_tsne)
+from core.gradcam import compute_gradcam, make_gradcam_figure, overlay_heatmap
 from core.image_trainer import HP_BATCH_OPTS as IMG_BATCH_OPTS
 from core.image_trainer import HP_LR_OPTS as IMG_LR_OPTS
 from core.image_trainer import predict_image, train_image_model
+from core.mnist_model import (evaluate_cnn, load_mnist, make_confusion_10,
+                              make_sample_grid, make_training_curves,
+                              predict_digit, train_cnn_model)
+from core.multivariate_regression import (ALL_FEATURE_NAMES,
+                                          FEATURE_DESCRIPTIONS,
+                                          make_importance_figure,
+                                          make_scatter_residuals_figure,
+                                          predict_multivariate,
+                                          train_multivariate_model)
 from core.price_predictor import (generate_dataset, make_dataset_figure,
                                   make_regression_figure, predict_price,
                                   train_price_model)
-from core.mnist_model import (
-    load_mnist, train_cnn_model, evaluate_cnn, predict_digit,
-    make_sample_grid, make_training_curves, make_confusion_10,
-)
 from core.text_trainer import (build_knn_index, classify_knn, classify_with_nn,
                                embed_single, knn_leave_one_out,
                                split_text_into_chunks, train_text_nn_model)
@@ -94,14 +152,13 @@ from datasets.text_datasets import download_and_prepare as agnews_download
 from datasets.text_datasets import is_prepared as agnews_prepared
 from datasets.text_datasets import load_all_as_text_classes as agnews_load
 from datasets.text_datasets import sample_counts as agnews_counts
-from PIL import Image
 from utils.augmentation import augment_image
 from utils.confusion_matrix import make_confusion_figure
 # Courbes d'apprentissage
 from utils.learning_curve import (audio_learning_curve,
                                   cats_dogs_learning_curve,
-                                  image_learning_curve, text_learning_curve,
-                                  price_learning_curve, mnist_learning_curve)
+                                  image_learning_curve, mnist_learning_curve,
+                                  price_learning_curve, text_learning_curve)
 from utils.pdf_import import extract_pdf_page_images, extract_pdf_text
 # Suggestions automatiques
 from utils.suggestions import (analyze_class_balance, analyze_training_results,
@@ -146,6 +203,14 @@ def make_initial_state() -> dict:
         "mnist_y_test":      None,
         "mnist_model":       None,
         "mnist_trained":     False,
+        # Clustering (K-Means)
+        "clustering_k":      None,
+        "clustering_sil":    None,
+        "clustering_ari":    None,
+        # Régression multivariée
+        "multireg_pipe":     None,
+        "multireg_metrics":  None,
+        "multireg_features": None,
     }
 
 
@@ -1225,6 +1290,376 @@ def mnist_lc_cb(state: dict):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  CLUSTERING — CALLBACKS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def clustering_elbow_cb(k_max: int, state: dict, progress=gr.Progress()):
+    """Calcule la méthode du coude (inertie + silhouette) sur MNIST."""
+    X_train = state.get("mnist_X_train")
+    if X_train is None:
+        return None, "⚠️ Chargez d'abord le dataset MNIST (onglet Chiffres MNIST)."
+    progress(0.1, desc="Préparation des données…")
+    X_flat = flatten(X_train)
+    progress(0.2, desc="Calcul K-Means pour K = 2 … " + str(int(k_max)) + "…")
+    ks, inertias, silhouettes, best_k = run_elbow(X_flat, k_max=int(k_max), n_elbow=3000)
+    progress(1.0, desc="Terminé")
+    fig = make_elbow_figure(ks, inertias, silhouettes, best_k=best_k)
+    msg = (
+        f"✓ Méthode du coude calculée ({len(ks)} valeurs de K)\n"
+        f"K recommandé par silhouette maximale : **K = {best_k}**\n"
+        f"Silhouette max : {max(silhouettes):.4f}"
+    )
+    return fig, msg, int(best_k)
+
+
+def clustering_run_cb(k: int, n_tsne: int, state: dict, progress=gr.Progress()):
+    """Lance K-Means + t-SNE sur MNIST."""
+    X_train = state.get("mnist_X_train")
+    y_train = state.get("mnist_y_train")
+    if X_train is None:
+        yield state, None, "⚠️ Chargez d'abord le dataset MNIST.", ""
+        return
+
+    progress(0.05, desc="Aplatissage des images…")
+    X_flat = flatten(X_train)
+    k = int(k)
+    n_tsne = int(n_tsne)
+
+    progress(0.15, desc=f"K-Means K={k} en cours…")
+    result = run_kmeans(X_flat, k=k, true_labels=y_train, n_kmeans=5000)
+
+    progress(0.55, desc=f"t-SNE (n={min(n_tsne, len(result['X_sub']))} points) …")
+    X_2d, tsne_idx = run_tsne(result["X_sub"], n_tsne=n_tsne)
+
+    labels_tsne = result["labels"][tsne_idx]
+    true_tsne   = y_train[result["idx"]][tsne_idx] if y_train is not None else None
+
+    progress(0.90, desc="Génération des figures…")
+    tsne_fig = make_tsne_figure(X_2d, labels_tsne, true_tsne, k=k)
+
+    st = _s(state)
+    st["clustering_k"]   = k
+    st["clustering_sil"] = result["silhouette"]
+    st["clustering_ari"] = result["ari"]
+
+    ari_str = f"  │  ARI = {result['ari']:.4f}" if result["ari"] is not None else ""
+    msg = (
+        f"✓ K-Means terminé (K={k})\n"
+        f"Inertie     : {result['inertia']:.1f}\n"
+        f"Silhouette  : {result['silhouette']:.4f}{ari_str}\n\n"
+        f"t-SNE : {len(X_2d)} points visualisés\n\n"
+        "**ARI (Adjusted Rand Index)** mesure l'accord entre les clusters trouvés\n"
+        "et les vraies étiquettes (0 = aléatoire, 1 = parfait)."
+    )
+    progress(1.0, desc="Terminé !")
+    yield st, tsne_fig, msg
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  RÉGRESSION MULTIVARIÉE — CALLBACKS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def multireg_train_cb(
+    feat_selection: list[str],
+    model_type_radio: str,
+    state: dict,
+    progress=gr.Progress(),
+):
+    """Entraîne la régression multivariée sur California Housing."""
+    if not feat_selection:
+        return state, None, None, "⚠️ Sélectionnez au moins une feature."
+
+    progress(0.1, desc="Chargement California Housing…")
+    mtype = "ridge" if "Ridge" in model_type_radio else "linear"
+
+    progress(0.3, desc="Entraînement du modèle…")
+    try:
+        pipe, metrics, X_all, y_all, X_test, y_test, y_pred = train_multivariate_model(
+            feat_selection, model_type=mtype
+        )
+    except Exception as e:
+        return state, None, None, f"❌ Erreur : {e}"
+
+    progress(0.75, desc="Génération des figures…")
+    fig_imp = make_importance_figure(metrics["coefs"], metrics["features"])
+    fig_sc  = make_scatter_residuals_figure(y_test, y_pred, metrics["R²_test"])
+
+    st = _s(state)
+    st["multireg_pipe"]     = pipe
+    st["multireg_metrics"]  = metrics
+    st["multireg_features"] = metrics["features"]
+
+    n_feat = len(metrics["features"])
+    summary = (
+        f"## Résultats — Régression {metrics['model_type'].capitalize()}\n\n"
+        f"**Features utilisées** : {n_feat} / {len(ALL_FEATURE_NAMES)}\n\n"
+        f"| Métrique  | Train  | Test  |\n"
+        f"|-----------|--------|-------|\n"
+        f"| **R²**    | {metrics['R²_train']:.3f} | **{metrics['R²_test']:.3f}** |\n"
+        f"| RMSE (k$) | {metrics['RMSE_train']:.1f}  | {metrics['RMSE_test']:.1f}  |\n"
+        f"| MAE  (k$) | {metrics['MAE_train']:.1f}  | {metrics['MAE_test']:.1f}  |\n\n"
+        f"Entraîné sur **{metrics['n_train']:,}** exemples, testé sur **{metrics['n_test']:,}**.\n\n"
+        f"*California Housing : 20 640 quartiers californiens (recensement 1990).*"
+    )
+    progress(1.0)
+    return st, fig_imp, fig_sc, summary
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  GRAD-CAM — CALLBACKS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def gradcam_cd_cb(img_input, progress=gr.Progress()):
+    """Grad-CAM sur le modèle EfficientNetB0 Chats & Chiens."""
+    import tensorflow as tf
+
+    from cats_vs_dogs.dl_model import CNN_PATH
+
+    if img_input is None:
+        return None, "⚠️ Chargez une image."
+    if not CNN_PATH.exists():
+        return None, "⚠️ Entraînez d'abord le CNN Chats & Chiens."
+
+    progress(0.2, desc="Chargement du modèle…")
+    try:
+        model = tf.keras.models.load_model(CNN_PATH)
+    except Exception as e:
+        return None, f"❌ Erreur chargement modèle : {e}"
+
+    img_size = model.input_shape[1]
+    from PIL import Image as PILImage
+    pil = PILImage.fromarray(img_input).convert("RGB").resize((img_size, img_size))
+    arr = np.array(pil, dtype=np.float32) / 255.0
+    img_batch = arr[np.newaxis]
+
+    progress(0.5, desc="Calcul Grad-CAM…")
+    try:
+        heatmap, pred_idx, confidence = compute_gradcam(model, img_batch)
+    except Exception as e:
+        return None, f"❌ Erreur Grad-CAM : {e}"
+
+    from cats_vs_dogs.dl_model import CLASS_NAMES as CD_CLASS_NAMES
+    class_name = CD_CLASS_NAMES[pred_idx] if pred_idx < len(CD_CLASS_NAMES) else str(pred_idx)
+
+    progress(0.85, desc="Génération des figures…")
+    overlay = overlay_heatmap(arr, heatmap)
+    fig = make_gradcam_figure(
+        arr, heatmap, overlay, class_name, confidence,
+        title="Grad-CAM — EfficientNetB0 Chats & Chiens",
+    )
+    progress(1.0)
+    msg = f"Prédiction : **{class_name}** (confiance : {confidence:.1%})"
+    return fig, msg
+
+
+def gradcam_mnist_cb(sketch, state: dict, progress=gr.Progress()):
+    """Grad-CAM sur le CNN MNIST (modèle en mémoire)."""
+    model = state.get("mnist_model")
+    if model is None:
+        return None, "⚠️ Entraînez d'abord le CNN MNIST."
+    if sketch is None:
+        return None, "⚠️ Dessinez un chiffre dans le canvas."
+
+    progress(0.3, desc="Prétraitement…")
+    result = predict_digit(model, sketch)
+    if result is None:
+        return None, "⚠️ Image non reconnue."
+
+    pred, probs = result
+    # Récupérer le tableau numpy 28×28
+    from core.mnist_model import preprocess_digit_image
+    img_batch = preprocess_digit_image(sketch)
+    if img_batch is None:
+        return None, "⚠️ Impossible de prétraiter l'image."
+
+    progress(0.55, desc="Calcul Grad-CAM…")
+    try:
+        heatmap, pred_idx, confidence = compute_gradcam(model, img_batch, class_idx=int(pred))
+    except Exception as e:
+        return None, f"❌ Erreur Grad-CAM : {e}"
+
+    # Convertir img_batch en RGB pour l'affichage
+    img_2d = img_batch[0, :, :, 0]
+    img_rgb = np.stack([img_2d] * 3, axis=-1)
+
+    progress(0.85, desc="Génération des figures…")
+    overlay = overlay_heatmap(img_rgb, heatmap)
+    fig = make_gradcam_figure(
+        img_rgb, heatmap, overlay, str(pred), confidence,
+        title="Grad-CAM — CNN MNIST",
+    )
+    progress(1.0)
+    return fig, f"Chiffre : **{pred}** — confiance : {confidence:.1%}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  DASHBOARD — CALLBACK
+# ─────────────────────────────────────────────────────────────────────────────
+
+def dashboard_refresh_cb(state: dict):
+    """Construit le tableau comparatif et le graphe des métriques."""
+    from cats_vs_dogs.dl_model import model_trained as dl_model_trained
+    from cats_vs_dogs.ml_model import models_trained as ml_models_trained
+
+    def _badge(ok: bool) -> str:
+        return "✅ Entraîné" if ok else "⬜ Non entraîné"
+
+    ml_status = ml_models_trained()
+
+    rows = [
+        {
+            "Modèle": "🖼️ Image (MobileNetV2)",
+            "Algorithme": "Transfer Learning",
+            "Données": "Personnalisées",
+            "Métrique": "Acc (train)",
+            "Valeur": "—",
+            "Statut": _badge(state.get("image_trained", False)),
+        },
+        {
+            "Modèle": "🔊 Audio (Mel + Dense)",
+            "Algorithme": "Réseau Dense",
+            "Données": "Personnalisées",
+            "Métrique": "Acc (train)",
+            "Valeur": "—",
+            "Statut": _badge(state.get("audio_trained", False)),
+        },
+        {
+            "Modèle": "📝 Texte (USE + KNN)",
+            "Algorithme": "K-NN cosinus",
+            "Données": "Personnalisées",
+            "Métrique": "LOO Acc",
+            "Valeur": "—",
+            "Statut": _badge(state.get("text_trained", False)),
+        },
+        {
+            "Modèle": "🐱 SVM Chats & Chiens",
+            "Algorithme": "SVM (HOG)",
+            "Données": "TF-Dogs (~786 MB)",
+            "Métrique": "Test Acc",
+            "Valeur": "—",
+            "Statut": _badge(ml_status.get("svm", False)),
+        },
+        {
+            "Modèle": "🐶 RF Chats & Chiens",
+            "Algorithme": "Random Forest",
+            "Données": "TF-Dogs (~786 MB)",
+            "Métrique": "Test Acc",
+            "Valeur": "—",
+            "Statut": _badge(ml_status.get("rf", False)),
+        },
+        {
+            "Modèle": "🧠 CNN Chats & Chiens",
+            "Algorithme": "EfficientNetB0",
+            "Données": "TF-Dogs (~786 MB)",
+            "Métrique": "Test Acc",
+            "Valeur": "—",
+            "Statut": _badge(dl_model_trained()),
+        },
+        {
+            "Modèle": "🔢 CNN MNIST",
+            "Algorithme": "CNN (2 Conv)",
+            "Données": "MNIST (70k img)",
+            "Métrique": "Test Acc",
+            "Valeur": "—",
+            "Statut": _badge(state.get("mnist_trained", False)),
+        },
+        {
+            "Modèle": "🏠 Régression 1D",
+            "Algorithme": "Linéaire (sklearn)",
+            "Données": "Synthétique",
+            "Métrique": "R² test",
+            "Valeur": (
+                f"{state['price_metrics']['R²_test']:.3f}"
+                if state.get("price_metrics") else "—"
+            ),
+            "Statut": _badge(state.get("price_model") is not None),
+        },
+        {
+            "Modèle": "🏘️ Régression Multi",
+            "Algorithme": state.get("multireg_metrics", {}).get("model_type", "—").capitalize() if state.get("multireg_metrics") else "—",
+            "Données": "California Housing",
+            "Métrique": "R² test",
+            "Valeur": (
+                f"{state['multireg_metrics']['R²_test']:.3f}"
+                if state.get("multireg_metrics") else "—"
+            ),
+            "Statut": _badge(state.get("multireg_pipe") is not None),
+        },
+        {
+            "Modèle": "🔵 K-Means",
+            "Algorithme": "K-Means",
+            "Données": "MNIST (embed)",
+            "Métrique": "Silhouette / ARI",
+            "Valeur": (
+                f"{state['clustering_sil']:.4f} / {state['clustering_ari']:.4f}"
+                if state.get("clustering_sil") is not None and state.get("clustering_ari") is not None
+                else (f"{state['clustering_sil']:.4f}" if state.get("clustering_sil") is not None else "—")
+            ),
+            "Statut": _badge(state.get("clustering_k") is not None),
+        },
+    ]
+
+    # ── Tableau HTML ────────────────────────────────────────────
+    header = ["Modèle", "Algorithme", "Données", "Métrique", "Valeur", "Statut"]
+    tbl_rows = "\n".join(
+        "<tr>" + "".join(f"<td>{row[h]}</td>" for h in header) + "</tr>"
+        for row in rows
+    )
+    thead = "<tr>" + "".join(f"<th>{h}</th>" for h in header) + "</tr>"
+    html = f"""
+    <style>
+    .dash-table {{
+        width: 100%; border-collapse: collapse; font-size: 0.88rem;
+        background: #111827; border-radius: 10px; overflow: hidden;
+    }}
+    .dash-table th {{
+        background: #1f2937; color: #a855f7; padding: 8px 12px;
+        text-align: left; font-weight: 600; border-bottom: 2px solid #374151;
+    }}
+    .dash-table td {{
+        color: #d1d5db; padding: 7px 12px; border-bottom: 1px solid #1f2937;
+    }}
+    .dash-table tr:hover td {{ background: #1f2937; }}
+    </style>
+    <table class="dash-table">
+    <thead>{thead}</thead>
+    <tbody>{tbl_rows}</tbody>
+    </table>
+    """
+
+    # ── Figure comparative (R² uniquement pour les modèles qui en ont) ──────
+    metric_rows = [r for r in rows if r["Valeur"] != "—" and "/" not in r["Valeur"]]
+    fig = None
+    if metric_rows:
+        fig, ax = plt.subplots(figsize=(8, max(3, len(metric_rows) * 0.6 + 1)))
+        fig.patch.set_facecolor("#1a1a2e")
+        ax.set_facecolor("#0f0f1a")
+        ax.tick_params(colors="white")
+        for sp in ax.spines.values():
+            sp.set_edgecolor("#333")
+        ax.grid(alpha=0.2, color="#444", axis="x")
+
+        names   = [r["Modèle"].split(" ", 1)[-1] for r in metric_rows]
+        values  = [float(r["Valeur"]) for r in metric_rows]
+        colors  = ["#a855f7", "#22d3ee", "#4ade80", "#f97316"]
+        bars = ax.barh(names, values,
+                       color=[colors[i % len(colors)] for i in range(len(names))],
+                       alpha=0.85, edgecolor="#333", linewidth=0.5)
+        for bar, v in zip(bars, values):
+            ax.text(v + 0.005, bar.get_y() + bar.get_height() / 2,
+                    f"{v:.3f}", va="center", color="white", fontsize=9)
+        ax.set_xlabel("R² (test)", color="white", fontsize=9)
+        ax.set_title("Comparaison R² — modèles de régression", color="white", fontsize=11, fontweight="bold")
+        ax.set_yticklabels(names, color="white", fontsize=9)
+        ax.set_xlim(0, 1.05)
+        fig.tight_layout()
+
+    n_trained = sum(1 for r in rows if "✅" in r["Statut"])
+    summary = f"**{n_trained} / {len(rows)}** modèles entraînés dans cette session."
+    return html, fig, summary
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  GRADIO UI
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1236,13 +1671,91 @@ def build_ui():
             neutral_hue="slate",
         ),
         css="""
-            .gr-group { border-radius: 10px !important; }
+            /* ── Layout ─────────────────────────────────── */
             footer { display: none !important; }
+            .gradio-container { max-width: 1440px !important; margin: 0 auto !important; }
+
+            /* ── Header ─────────────────────────────────── */
+            .hero-block {
+                background: linear-gradient(135deg, #1e1b4b 0%, #2d1b69 50%, #1a1a2e 100%) !important;
+                border: 1px solid #4c1d95 !important;
+                border-radius: 14px !important;
+                padding: 1.4rem 2rem !important;
+                margin-bottom: 0.5rem !important;
+                box-shadow: 0 4px 24px rgba(124, 58, 237, 0.25) !important;
+            }
+            .hero-block h1 { color: #e9d5ff !important; font-size: 1.9rem !important; margin: 0 !important; }
+            .hero-block p  { color: #c4b5fd !important; margin: 0.25rem 0 0 !important; font-size: 0.95rem !important; }
+
+            /* ── Cards / Groups ──────────────────────────── */
+            .gr-group {
+                background: #111827 !important;
+                border: 1px solid #1f2937 !important;
+                border-radius: 12px !important;
+            }
+
+            /* ── Accordions ──────────────────────────────── */
+            .gr-accordion { border-radius: 10px !important; border: 1px solid #1f2937 !important; }
+
+            /* ── Primary buttons ─────────────────────────── */
+            .gr-button-primary,
+            button[variant="primary"],
+            button.primary {
+                background: linear-gradient(135deg, #6d28d9, #a855f7) !important;
+                border: none !important;
+                transition: transform 0.15s ease, box-shadow 0.15s ease !important;
+            }
+            .gr-button-primary:hover,
+            button[variant="primary"]:hover {
+                transform: translateY(-1px) !important;
+                box-shadow: 0 4px 16px rgba(168, 85, 247, 0.45) !important;
+            }
+
+            /* ── Secondary buttons ───────────────────────── */
+            .gr-button-secondary,
+            button[variant="secondary"] {
+                border-color: #374151 !important;
+                color: #d1d5db !important;
+            }
+
+            /* ── Inputs ──────────────────────────────────── */
+            textarea, .gr-text-input input {
+                background: #1f2937 !important;
+                border-color: #374151 !important;
+                color: #f9fafb !important;
+            }
+
+            /* ── Plots containers ────────────────────────── */
+            .plot-container > div { border-radius: 8px !important; overflow: hidden !important; }
+
+            /* ── Markdown inside tabs ────────────────────── */
+            .tab-content .prose h2 { color: #c4b5fd !important; }
+            .tab-content .prose h3 { color: #a5b4fc !important; }
+            .tab-content .prose code { background: #1f2937 !important; color: #a855f7 !important; }
+
+            /* ── Section labels ──────────────────────────── */
+            .section-label {
+                font-size: 0.75rem !important;
+                font-weight: 600 !important;
+                text-transform: uppercase !important;
+                letter-spacing: 0.05em !important;
+                color: #6b7280 !important;
+                margin-bottom: 0.5rem !important;
+            }
+
+            /* ── Badge trained ───────────────────────────── */
+            .badge-ok  { color: #4ade80 !important; font-weight: 700; }
+            .badge-no  { color: #6b7280 !important; }
         """,
     ) as demo:
         state = gr.State(make_initial_state)
 
-        gr.Markdown("# ML Vision Studio\nEntraînez et testez des modèles image, audio et texte.")
+        with gr.Group(elem_classes="hero-block"):
+            gr.Markdown(
+                "# ML Vision Studio\n"
+                "Plateforme pédagogique d'IA — entraînez, visualisez et comparez "
+                "des modèles **Machine Learning** et **Deep Learning** sur image, audio, texte et données tabulaires."
+            )
 
         with gr.Tabs():
 
@@ -1759,6 +2272,23 @@ def build_ui():
                                  cd_pred_cnn, cd_pred_ensemble],
                     )
 
+                # ── Grad-CAM ──────────────────────────────────────────────────
+                with gr.Accordion("🔥 Grad-CAM — Zones d'attention du CNN", open=False):
+                    gr.Markdown(
+                        "**Grad-CAM** visualise les zones de l'image sur lesquelles "
+                        "le réseau se concentre pour prédire « chat » ou « chien ».  \n"
+                        "Nécessite que le **CNN EfficientNetB0** soit entraîné."
+                    )
+                    cd_gcam_img = gr.Image(label="Image (chat ou chien)", type="numpy", height=250)
+                    cd_gcam_btn = gr.Button("Analyser avec Grad-CAM", variant="primary")
+                    cd_gcam_msg = gr.Textbox(label="Prédiction", interactive=False, lines=1)
+                    cd_gcam_fig = gr.Plot(label="Image | Heatmap | Superposition")
+                    cd_gcam_btn.click(
+                        fn=gradcam_cd_cb,
+                        inputs=cd_gcam_img,
+                        outputs=[cd_gcam_fig, cd_gcam_msg],
+                    )
+
             # ── TAB 7 : PRIX MAISON ───────────────────────────────────────────
             with gr.TabItem("🏠 Prix Maison"):
                 gr.Markdown(
@@ -1968,8 +2498,41 @@ def build_ui():
                     outputs=[mnist_lc_plot, mnist_lc_diag],
                 )
 
+                # ── Grad-CAM MNIST ────────────────────────────────────────────
+                with gr.Accordion("🔥 Grad-CAM — Ce que le CNN voit", open=False):
+                    gr.Markdown(
+                        "**Grad-CAM** met en évidence les pixels déterminants pour "
+                        "la reconnaissance du chiffre.  \n"
+                        "Dessinez un chiffre ci-dessous (ou réutilisez le canvas ci-dessus), "
+                        "puis cliquez **Analyser**.  \n"
+                        "Nécessite que le **CNN MNIST** soit entraîné."
+                    )
+                    with gr.Row():
+                        mnist_gcam_sketch = gr.Sketchpad(
+                            label="Dessinez un chiffre",
+                            type="pil",
+                            canvas_size=(280, 280),
+                            brush=gr.Brush(colors=["#ffffff"], color_mode="fixed",
+                                           default_size=24),
+                            layers=False,
+                            height=300,
+                        )
+                        with gr.Column():
+                            mnist_gcam_btn = gr.Button(
+                                "Analyser avec Grad-CAM", variant="primary"
+                            )
+                            mnist_gcam_msg = gr.Textbox(
+                                label="Prédiction", interactive=False, lines=2
+                            )
+                    mnist_gcam_fig = gr.Plot(label="Image | Heatmap | Superposition")
+                    mnist_gcam_btn.click(
+                        fn=gradcam_mnist_cb,
+                        inputs=[mnist_gcam_sketch, state],
+                        outputs=[mnist_gcam_fig, mnist_gcam_msg],
+                    )
+
             # ── TAB 6 : CHAT ──────────────────────────────────────────────────
-            with gr.TabItem("Chat"):
+            with gr.TabItem("💬 Chat"):
                 chat_modality = gr.Radio(
                     ["Texte", "Image", "Audio"], value="Texte",
                     label="Modèle actif",
@@ -1994,6 +2557,178 @@ def build_ui():
                     inputs=[chat_input, chatbot, chat_modality, state],
                     outputs=[chatbot, chat_input],
                 )
+
+            # ── TAB 9 : K-MEANS CLUSTERING ────────────────────────────────────
+            with gr.TabItem("🔵 Clustering"):
+                gr.Markdown(
+                    "## K-Means Clustering — Apprentissage Non Supervisé\n"
+                    "Regroupe les images MNIST en **K clusters sans étiquettes**,\n"
+                    "puis compare visuellement la structure trouvée aux vraies classes."
+                )
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        with gr.Group():
+                            gr.Markdown("### Étape 1 — Méthode du coude")
+                            gr.Markdown(
+                                "Calcule l'inertie et le score **silhouette** pour K = 2 … K_max.  \n"
+                                "Le K optimal = là où la silhouette est maximale."
+                            )
+                            cl_kmax_sl  = gr.Slider(5, 15, value=12, step=1,
+                                                     label="K maximum à tester")
+                            cl_elbow_btn = gr.Button("Calculer la méthode du coude",
+                                                      variant="primary")
+                            cl_best_k_nb = gr.Number(label="K recommandé", interactive=False,
+                                                      precision=0)
+                        cl_elbow_msg = gr.Textbox(label="Résultat", interactive=False, lines=3)
+                        cl_elbow_fig = gr.Plot(label="Inertie + Silhouette")
+
+                    with gr.Column(scale=1):
+                        with gr.Group():
+                            gr.Markdown("### Étape 2 — Clustering + Visualisation t-SNE")
+                            gr.Markdown(
+                                "**t-SNE** réduit les 784 dimensions MNIST à 2D pour visualiser  \n"
+                                "comment les clusters K-Means correspondent aux vraies classes."
+                            )
+                            cl_k_sl     = gr.Slider(2, 15, value=10, step=1,
+                                                     label="K (nombre de clusters)")
+                            cl_tsne_sl  = gr.Slider(500, 3000, value=2000, step=500,
+                                                     label="Points pour t-SNE")
+                            cl_run_btn  = gr.Button("Lancer K-Means + t-SNE (~30 s)",
+                                                     variant="primary")
+                        cl_run_msg  = gr.Textbox(label="Métriques", interactive=False, lines=6)
+                        cl_tsne_fig = gr.Plot(label="Projection t-SNE")
+
+                with gr.Accordion("📖 Concepts clés", open=False):
+                    gr.Markdown(
+                        "#### K-Means\n"
+                        "Assigne chaque point au centroïde le plus proche, puis recalcule les centroïdes.  \n"
+                        "Minimise l'**inertie** = somme des distances² point→centroïde.\n\n"
+                        "#### Méthode du coude\n"
+                        "L'inertie décroît rapidement jusqu'au bon K, puis ralentit → forme un « coude ».\n\n"
+                        "#### Score Silhouette\n"
+                        "Mesure la cohésion (distance aux voisins du même cluster) vs séparation "
+                        "(distance au cluster le plus proche). Va de -1 à +1 (1 = parfait).\n\n"
+                        "#### ARI (Adjusted Rand Index)\n"
+                        "Compare les clusters trouvés aux vraies étiquettes. "
+                        "0 = aléatoire, 1 = identique. Attention : K-Means sans supervision "
+                        "ne peut pas atteindre 1.0 sur MNIST (10 classes, mais les chiffres se ressemblent).\n\n"
+                        "#### t-SNE\n"
+                        "Réduction non linéaire : préserve les structures locales. "
+                        "Les points proches en 784D restent proches en 2D."
+                    )
+
+                cl_elbow_btn.click(
+                    fn=clustering_elbow_cb,
+                    inputs=[cl_kmax_sl, state],
+                    outputs=[cl_elbow_fig, cl_elbow_msg, cl_best_k_nb],
+                )
+                cl_run_btn.click(
+                    fn=clustering_run_cb,
+                    inputs=[cl_k_sl, cl_tsne_sl, state],
+                    outputs=[state, cl_tsne_fig, cl_run_msg],
+                )
+
+            # ── TAB 10 : RÉGRESSION MULTIVARIÉE ──────────────────────────────
+            with gr.TabItem("🏘️ Régression Multi"):
+                gr.Markdown(
+                    "## Régression Multivariée — California Housing\n"
+                    "Prédit la **valeur médiane des maisons** (k$) à partir de "
+                    "jusqu'à **8 variables** socio-économiques.  \n"
+                    "Dataset : Census Bureau 1990 — 20 640 quartiers californiens."
+                )
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        with gr.Group():
+                            gr.Markdown("### Features à inclure")
+                            mr_feat_check = gr.CheckboxGroup(
+                                choices=ALL_FEATURE_NAMES,
+                                value=["MedInc", "HouseAge", "AveRooms",
+                                       "AveOccup", "Latitude", "Longitude"],
+                                label="Variables explicatives",
+                            )
+                            gr.Markdown(
+                                "| Feature | Description |\n"
+                                "|---------|-------------|\n"
+                                "| `MedInc` | Revenu médian (×10k$) |\n"
+                                "| `HouseAge` | Âge médian des logements |\n"
+                                "| `AveRooms` | Nb pièces moyen |\n"
+                                "| `AveBedrms` | Nb chambres moyen |\n"
+                                "| `Population` | Population quartier |\n"
+                                "| `AveOccup` | Occupants moyens |\n"
+                                "| `Latitude` | Latitude géo |\n"
+                                "| `Longitude` | Longitude géo |"
+                            )
+
+                        with gr.Group():
+                            gr.Markdown("### Modèle")
+                            mr_model_radio = gr.Radio(
+                                ["Linéaire (OLS)", "Ridge (régularisation L2)"],
+                                value="Linéaire (OLS)",
+                                label="Type de régression",
+                            )
+                            mr_train_btn = gr.Button(
+                                "Entraîner (~2 s)", variant="primary"
+                            )
+                        mr_summary_md = gr.Markdown("*Sélectionnez des features et entraînez.*")
+
+                    with gr.Column(scale=2):
+                        with gr.Row():
+                            mr_imp_fig = gr.Plot(label="Importance des features")
+                            mr_sc_fig  = gr.Plot(label="Prédit vs Réel + Résidus")
+
+                with gr.Accordion("📖 Concepts clés", open=False):
+                    gr.Markdown(
+                        "#### Régression multivariée\n"
+                        "Étend la régression linéaire à plusieurs variables :  \n"
+                        "`Prix = a₁×MedInc + a₂×HouseAge + … + b`  \n"
+                        "La solution est toujours calculée analytiquement (équations normales).\n\n"
+                        "#### Ridge (régularisation L2)\n"
+                        "Ajoute une pénalité `λ‖w‖²` aux coefficients : empêche l'overfitting "
+                        "et stabilise les estimations quand les features sont corrélées.\n\n"
+                        "#### R² (score de détermination)\n"
+                        "Part de la variance expliquée par le modèle. 0.60 = 60% de la "
+                        "variabilité des prix est capturée.  \n"
+                        "California Housing plafonne autour de R²≈0.60–0.65 avec la régression "
+                        "linéaire (relations non-linéaires importantes).\n\n"
+                        "#### Graphe des résidus\n"
+                        "Un nuage aléatoire autour de 0 → modèle bien spécifié.  \n"
+                        "Un entonnoir → hétéroscédasticité (log-transformer y)."
+                    )
+
+                mr_train_btn.click(
+                    fn=multireg_train_cb,
+                    inputs=[mr_feat_check, mr_model_radio, state],
+                    outputs=[state, mr_imp_fig, mr_sc_fig, mr_summary_md],
+                )
+
+            # ── TAB 11 : DASHBOARD ────────────────────────────────────────────
+            with gr.TabItem("📊 Dashboard"):
+                gr.Markdown(
+                    "## Tableau de Bord — Vue d'Ensemble des Modèles\n"
+                    "Résumé de tous les modèles entraînés dans la session courante."
+                )
+                dash_refresh_btn = gr.Button("🔄 Rafraîchir le tableau", variant="primary")
+                dash_summary_md  = gr.Markdown("*Cliquez sur Rafraîchir.*")
+                dash_table_html  = gr.HTML()
+                dash_metric_fig  = gr.Plot(label="Comparaison R² — modèles de régression")
+
+                with gr.Accordion("📖 Lecture du tableau", open=False):
+                    gr.Markdown(
+                        "**Modèle** : identifiant de l'algorithme  \n"
+                        "**Métrique** : précision (classification) ou R² (régression), silhouette (clustering)  \n"
+                        "**Statut** : ✅ = modèle entraîné cette session  \n\n"
+                        "Les métriques de précision image/audio/texte/MNIST ne sont pas persistées "
+                        "dans la session Gradio actuelle — relancez l'entraînement pour les voir."
+                    )
+
+                dash_refresh_btn.click(
+                    fn=dashboard_refresh_cb,
+                    inputs=state,
+                    outputs=[dash_table_html, dash_metric_fig, dash_summary_md],
+                )
+
 
     return demo
 
