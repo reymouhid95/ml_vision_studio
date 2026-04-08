@@ -920,12 +920,12 @@ def cd_data_status() -> str:
 
 
 def cd_download():
-    yield "Téléchargement en cours (~786 MB la première fois)…"
+    yield "Téléchargement en cours (~800 MB la première fois)…", cd_data_status()
     try:
         msg = download_and_prepare()
-        yield msg
+        yield msg, cd_data_status()
     except Exception as e:
-        yield f"Erreur : {e}"
+        yield f"Erreur : {e}", cd_data_status()
 
 
 def cd_train_ml():
@@ -2097,7 +2097,7 @@ def build_ui():
                     cd_dl_btn  = gr.Button("Télécharger le dataset (~786 MB)")
                     cd_dl_log  = gr.Textbox(label="Progression", lines=3,
                                             interactive=False)
-                    cd_dl_btn.click(fn=cd_download, outputs=cd_dl_log)
+                    cd_dl_btn.click(fn=cd_download, outputs=[cd_dl_log, cd_status_txt])
 
                 with gr.Accordion("2. Approche ML — SVM + Random Forest", open=False):
                     gr.Markdown(
