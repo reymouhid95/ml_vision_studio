@@ -33,6 +33,7 @@ def train_image_model(
     classes: [{name: str, samples: [PIL.Image]}]
     """
     import tensorflow as tf
+
     from utils.augmentation import augment_image
 
     n_classes = len(classes)
@@ -48,8 +49,17 @@ def train_image_model(
                 xs.append(_pil_to_array(aug))
                 ys.append(ci)
 
-    xs = np.array(xs, dtype=np.float32)
-    ys = tf.keras.utils.to_categorical(ys, n_classes)
+    xs_arr = np.array(xs, dtype=np.float32)
+    ys_arr = np.array(ys, dtype=np.int32)
+
+    # tf.data.Dataset : envoie un batch à la fois sur GPU (évite OOM Maxwell 4 GB)
+    ds = (
+        tf.data.Dataset.from_tensor_slices((xs_arr, ys_arr))
+        .shuffle(len(xs_arr), reshuffle_each_iteration=True)
+        .batch(batch_size)
+        .map(lambda x, y: (x, tf.one_hot(y, n_classes)), num_parallel_calls=tf.data.AUTOTUNE)
+        .prefetch(tf.data.AUTOTUNE)
+    )
 
     # Build model
     base = tf.keras.applications.MobileNetV2(
@@ -85,20 +95,18 @@ def train_image_model(
     # Run training epoch by epoch to yield updates
     for ep in range(epochs):
         model.fit(
-            xs, ys,
+            ds,
             epochs=1,
-            batch_size=batch_size,
             verbose=0,
             callbacks=[cb],
-            shuffle=True,
         )
         if updates:
             yield updates.pop()
 
     # Evaluate on training set for confusion matrix
-    raw = model.predict(xs, verbose=0)
+    raw = model.predict(xs_arr, verbose=0)
     preds   = raw.argmax(axis=1).tolist()
-    actuals = ys.argmax(axis=1).tolist()
+    actuals = ys_arr.tolist()
 
     yield ("done", model, loss_hist, class_names, preds, actuals)
 

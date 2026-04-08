@@ -5,10 +5,6 @@ import site
 import sys
 
 
-# ── CUDA 11.8 via wheels pip (nvidia-*-cu11) pour Quadro M2000M Maxwell ──────
-# TF 2.14 inclut des kernels pré-compilés pour sm_50/sm_52 (Maxwell CC 5.x).
-# Le linker dynamique doit connaître les chemins .so avant le démarrage du
-# processus → on re-exécute si LD_LIBRARY_PATH n'est pas encore configuré.
 def _setup_cuda_and_reexec() -> None:
     sp = next((p for p in site.getsitepackages() if "site-packages" in p), None)
     if sp is None:
@@ -29,13 +25,11 @@ def _setup_cuda_and_reexec() -> None:
         os.environ["LD_LIBRARY_PATH"] = new_paths + (":" + current if current else "")
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
-# Supprime les logs verbeux TensorFlow/CUDA AVANT le re-exec
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
 _setup_cuda_and_reexec()
 
-# ── libdevice.10.bc requis par XLA pour compiler les kernels GPU (Maxwell) ────
 def _set_xla_libdevice() -> None:
     import site as _site
     sp = next((p for p in _site.getsitepackages() if "site-packages" in p), None)
@@ -95,8 +89,15 @@ try:
 except ImportError:
     pass
 
-# Ensure local packages resolve when run from project root
 sys.path.insert(0, os.path.dirname(__file__))
+
+# ── GPU : memory growth avant tout import TF ──────────────────────────────────
+import tensorflow as _tf
+
+for _gpu in _tf.config.list_physical_devices("GPU"):
+    _tf.config.experimental.set_memory_growth(_gpu, True)
+# Permet à TF de retomber sur CPU si une opération échoue sur Maxwell (CC 5.2)
+_tf.config.set_soft_device_placement(True)
 
 import gradio as gr
 import matplotlib
@@ -154,41 +155,32 @@ from datasets.text_datasets import load_all_as_text_classes as agnews_load
 from datasets.text_datasets import sample_counts as agnews_counts
 from utils.augmentation import augment_image
 from utils.confusion_matrix import make_confusion_figure
-# Courbes d'apprentissage
 from utils.learning_curve import (audio_learning_curve,
                                   cats_dogs_learning_curve,
                                   image_learning_curve, mnist_learning_curve,
                                   price_learning_curve, text_learning_curve)
 from utils.pdf_import import extract_pdf_page_images, extract_pdf_text
-# Suggestions automatiques
 from utils.suggestions import (analyze_class_balance, analyze_training_results,
                                format_suggestions)
 from utils.url_import import fetch_url_text
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  STATE
-# ─────────────────────────────────────────────────────────────────────────────
 
 def make_initial_state() -> dict:
     return {
-        # Image
-        "image_classes":     [],    # [{name, samples: [PIL.Image 224×224]}]
+        "image_classes":     [],    
         "image_model":       None,
         "image_class_names": [],
         "image_trained":     False,
-        # Audio
-        "audio_classes":     [],    # [{name, samples: [np.ndarray (40,)]}]
+        "audio_classes":     [],   
         "audio_model":       None,
         "audio_class_names": [],
         "audio_trained":     False,
-        # Text
-        "text_classes":      [],    # [{name, samples: [str]}]
-        "text_knn":          [],    # [{classIdx, embedding, text}]
+        "text_classes":      [],   
+        "text_knn":          [],  
         "text_model":        None,
         "text_class_names":  [],
         "text_mode":         "knn",
         "text_trained":      False,
-        # Prix maison
         "price_model":       None,
         "price_metrics":     None,
         "price_X":           None,
@@ -196,18 +188,15 @@ def make_initial_state() -> dict:
         "price_X_test":      None,
         "price_y_test":      None,
         "price_y_pred":      None,
-        # MNIST
         "mnist_X_train":     None,
         "mnist_y_train":     None,
         "mnist_X_test":      None,
         "mnist_y_test":      None,
         "mnist_model":       None,
         "mnist_trained":     False,
-        # Clustering (K-Means)
         "clustering_k":      None,
         "clustering_sil":    None,
         "clustering_ari":    None,
-        # Régression multivariée
         "multireg_pipe":     None,
         "multireg_metrics":  None,
         "multireg_features": None,
@@ -253,6 +242,7 @@ def _text_summary(st: dict) -> str:
 
 
 def _loss_fig(loss_hist: list[float]) -> plt.Figure:
+    plt.close("all")
     fig, ax = plt.subplots(figsize=(6, 2.5))
     fig.patch.set_facecolor("#1a1a2e")
     ax.set_facecolor("#0f0f1a")
@@ -298,10 +288,6 @@ def _cls_choices(classes: list[dict]) -> list[str]:
     return [c["name"] for c in classes]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  IMAGE CALLBACKS
-# ─────────────────────────────────────────────────────────────────────────────
-
 def img_add_class(class_name: str, state: dict):
     state = _s(state)
     state["image_classes"] = copy.deepcopy(state["image_classes"])
@@ -340,7 +326,6 @@ def img_train(epochs, lr, batch_size, units, state, progress=gr.Progress()):
         yield state, "Chaque classe doit avoir au moins 3 images.", None, None, ""
         return
 
-    # Suggestions avant entraînement
     pre_sugg = analyze_class_balance(classes)
 
     log_lines: list[str] = []
@@ -390,9 +375,6 @@ def img_save_model(state: dict):
     return tmp.name
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  AUDIO CALLBACKS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def aud_add_class(class_name: str, state: dict):
     state = _s(state)
@@ -490,10 +472,6 @@ def aud_save_model(state: dict):
     state["audio_model"].save(tmp.name)
     return tmp.name
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  TEXT CALLBACKS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def txt_add_class(class_name: str, state: dict):
     state = _s(state)
@@ -682,8 +660,6 @@ def txt_load_json(file_obj, state: dict):
         return state, f"Erreur chargement JSON : {e}", None, _text_summary(state)
 
 
-# ── tf_flowers (Image) ────────────────────────────────────────────────────────
-
 def flowers_status_str() -> str:
     if not flowers_prepared():
         return "Dataset non téléchargé."
@@ -721,8 +697,6 @@ def flowers_to_image_cb(state: dict):
         f"✓ {n} images chargées ({len(classes)} classes) — prêt à entraîner !",
     )
 
-
-# ── Speech Commands (Audio) ───────────────────────────────────────────────────
 
 def speech_status_str() -> str:
     if not speech_prepared():
@@ -766,8 +740,6 @@ def speech_to_audio_cb(state: dict):
     )
 
 
-# ── AG News (Texte) ───────────────────────────────────────────────────────────
-
 def agnews_status_str() -> str:
     if not agnews_prepared():
         return "Dataset non téléchargé."
@@ -806,10 +778,6 @@ def agnews_to_text_cb(state: dict):
         f"✓ {n} articles chargés ({len(classes)} classes) — prêt à indexer !",
     )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  COURBES D'APPRENTISSAGE CALLBACKS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def img_lc_cb(state: dict):
     classes = state["image_classes"]
@@ -855,10 +823,6 @@ def cd_lc_cb():
         return None, f"Erreur : {e}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  PREDICTION CALLBACK
-# ─────────────────────────────────────────────────────────────────────────────
-
 def pred_classify(image, audio_path, modality: str, state: dict):
     if modality == "Image":
         if image is None:
@@ -877,10 +841,6 @@ def pred_classify(image, audio_path, modality: str, state: dict):
             return None
         return predict_audio(state["audio_model"], audio_path, state["audio_class_names"])
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  CHAT CALLBACK
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _classify_text_query(query: str, state: dict) -> tuple[dict, str]:
     """Returns (scores_dict, excerpts_str)."""
@@ -948,10 +908,6 @@ def chat_send(message: str, history: list, modality: str, state: dict):
     history = history + [[message, reply]]
     return history, ""
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  CHATS & CHIENS CALLBACKS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def cd_data_status() -> str:
     if not is_prepared():
@@ -1060,7 +1016,6 @@ def cd_predict(img):
     if img is None:
         return "Chargez une image.", None, None, None, None
 
-    # Normalisation PIL → float32 numpy [0,1] à la résolution d'entraînement
     pil = Image.fromarray(img).convert("RGB").resize((CD_IMG_SIZE, CD_IMG_SIZE))
     arr = np.array(pil, dtype=np.float32) / 255.0
 
@@ -1098,10 +1053,6 @@ def cd_predict(img):
         _label(ensemble),
     )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  PRIX MAISON — CALLBACKS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def price_generate_dataset_cb(n_samples: int, noise_level: float, state: dict):
     """Génère et affiche le dataset synthétique."""
@@ -1176,10 +1127,6 @@ def price_lc_cb(n_samples: float, noise_level: float, state: dict):
     fig, diag = price_learning_curve(int(n_samples), float(noise_level))
     return fig, diag
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  MNIST — CALLBACKS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def mnist_load_cb(state: dict):
     """Charge le dataset MNIST et affiche une grille d'exemples."""
@@ -1288,11 +1235,6 @@ def mnist_lc_cb(state: dict):
     )
     return fig, diag
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  CLUSTERING — CALLBACKS
-# ─────────────────────────────────────────────────────────────────────────────
-
 def clustering_elbow_cb(k_max: int, state: dict, progress=gr.Progress()):
     """Calcule la méthode du coude (inertie + silhouette) sur MNIST."""
     X_train = state.get("mnist_X_train")
@@ -1354,11 +1296,6 @@ def clustering_run_cb(k: int, n_tsne: int, state: dict, progress=gr.Progress()):
     progress(1.0, desc="Terminé !")
     yield st, tsne_fig, msg
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  RÉGRESSION MULTIVARIÉE — CALLBACKS
-# ─────────────────────────────────────────────────────────────────────────────
-
 def multireg_train_cb(
     feat_selection: list[str],
     model_type_radio: str,
@@ -1404,10 +1341,6 @@ def multireg_train_cb(
     progress(1.0)
     return st, fig_imp, fig_sc, summary
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  GRAD-CAM — CALLBACKS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def gradcam_cd_cb(img_input, progress=gr.Progress()):
     """Grad-CAM sur le modèle EfficientNetB0 Chats & Chiens."""
@@ -1491,10 +1424,6 @@ def gradcam_mnist_cb(sketch, state: dict, progress=gr.Progress()):
     progress(1.0)
     return fig, f"Chiffre : **{pred}** — confiance : {confidence:.1%}"
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  DASHBOARD — CALLBACK
-# ─────────────────────────────────────────────────────────────────────────────
 
 def dashboard_refresh_cb(state: dict):
     """Construit le tableau comparatif et le graphe des métriques."""
@@ -1599,7 +1528,6 @@ def dashboard_refresh_cb(state: dict):
         },
     ]
 
-    # ── Tableau HTML ────────────────────────────────────────────
     header = ["Modèle", "Algorithme", "Données", "Métrique", "Valeur", "Statut"]
     tbl_rows = "\n".join(
         "<tr>" + "".join(f"<td>{row[h]}</td>" for h in header) + "</tr>"
@@ -1627,7 +1555,6 @@ def dashboard_refresh_cb(state: dict):
     </table>
     """
 
-    # ── Figure comparative (R² uniquement pour les modèles qui en ont) ──────
     metric_rows = [r for r in rows if r["Valeur"] != "—" and "/" not in r["Valeur"]]
     fig = None
     if metric_rows:
@@ -1659,10 +1586,6 @@ def dashboard_refresh_cb(state: dict):
     return html, fig, summary
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  GRADIO UI
-# ─────────────────────────────────────────────────────────────────────────────
-
 def build_ui():
     with gr.Blocks(
         title="ML Vision Studio",
@@ -1671,11 +1594,9 @@ def build_ui():
             neutral_hue="slate",
         ),
         css="""
-            /* ── Layout ─────────────────────────────────── */
             footer { display: none !important; }
             .gradio-container { max-width: 1440px !important; margin: 0 auto !important; }
 
-            /* ── Header ─────────────────────────────────── */
             .hero-block {
                 background: linear-gradient(135deg, #1e1b4b 0%, #2d1b69 50%, #1a1a2e 100%) !important;
                 border: 1px solid #4c1d95 !important;
@@ -1687,17 +1608,14 @@ def build_ui():
             .hero-block h1 { color: #e9d5ff !important; font-size: 1.9rem !important; margin: 0 !important; }
             .hero-block p  { color: #c4b5fd !important; margin: 0.25rem 0 0 !important; font-size: 0.95rem !important; }
 
-            /* ── Cards / Groups ──────────────────────────── */
             .gr-group {
                 background: #111827 !important;
                 border: 1px solid #1f2937 !important;
                 border-radius: 12px !important;
             }
 
-            /* ── Accordions ──────────────────────────────── */
             .gr-accordion { border-radius: 10px !important; border: 1px solid #1f2937 !important; }
 
-            /* ── Primary buttons ─────────────────────────── */
             .gr-button-primary,
             button[variant="primary"],
             button.primary {
@@ -1711,29 +1629,24 @@ def build_ui():
                 box-shadow: 0 4px 16px rgba(168, 85, 247, 0.45) !important;
             }
 
-            /* ── Secondary buttons ───────────────────────── */
             .gr-button-secondary,
             button[variant="secondary"] {
                 border-color: #374151 !important;
                 color: #d1d5db !important;
             }
 
-            /* ── Inputs ──────────────────────────────────── */
             textarea, .gr-text-input input {
                 background: #1f2937 !important;
                 border-color: #374151 !important;
                 color: #f9fafb !important;
             }
 
-            /* ── Plots containers ────────────────────────── */
             .plot-container > div { border-radius: 8px !important; overflow: hidden !important; }
 
-            /* ── Markdown inside tabs ────────────────────── */
             .tab-content .prose h2 { color: #c4b5fd !important; }
             .tab-content .prose h3 { color: #a5b4fc !important; }
             .tab-content .prose code { background: #1f2937 !important; color: #a855f7 !important; }
 
-            /* ── Section labels ──────────────────────────── */
             .section-label {
                 font-size: 0.75rem !important;
                 font-weight: 600 !important;
@@ -1743,7 +1656,6 @@ def build_ui():
                 margin-bottom: 0.5rem !important;
             }
 
-            /* ── Badge trained ───────────────────────────── */
             .badge-ok  { color: #4ade80 !important; font-weight: 700; }
             .badge-no  { color: #6b7280 !important; }
         """,
@@ -1759,7 +1671,6 @@ def build_ui():
 
         with gr.Tabs():
 
-            # ── TAB 1 : PRÉDICTION ────────────────────────────────────────────
             with gr.TabItem("Prédiction"):
                 pred_modality = gr.Radio(
                     ["Image", "Audio"], value="Image", label="Modalité"
@@ -1793,7 +1704,6 @@ def build_ui():
                     outputs=pred_label,
                 )
 
-            # ── TAB 2 : IMAGE ─────────────────────────────────────────────────
             with gr.TabItem("Image"):
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -1903,7 +1813,6 @@ def build_ui():
                     outputs=[state, img_cls_drop, img_summary, fl_dl_log],
                 )
 
-            # ── TAB 3 : AUDIO ─────────────────────────────────────────────────
             with gr.TabItem("Audio"):
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -2019,7 +1928,6 @@ def build_ui():
                     outputs=[state, aud_cls_drop, aud_summary, sp_dl_log],
                 )
 
-            # ── TAB 4 : TEXTE ─────────────────────────────────────────────────
             with gr.TabItem("Texte"):
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -2164,7 +2072,6 @@ def build_ui():
                     inputs=state,
                     outputs=[txt_lc_plot, txt_lc_diag],
                 )
-                # Sync mode radio → state
                 def _set_text_mode(mode_str: str, st: dict):
                     st = _s(st)
                     st["text_mode"] = "nn" if mode_str == "NN" else "knn"
@@ -2175,7 +2082,6 @@ def build_ui():
                     outputs=state,
                 )
 
-            # ── TAB 5 : CHATS & CHIENS ───────────────────────────────────────
             with gr.TabItem("🐱 Chats & Chiens"):
                 gr.Markdown(
                     "## Classificateur Chats vs Chiens\n"
@@ -2183,7 +2089,6 @@ def build_ui():
                     "et un **réseau CNN** entraîné from scratch."
                 )
 
-                # ── Données ──────────────────────────────────────────────────
                 with gr.Accordion("1. Données", open=True):
                     cd_status_txt = gr.Textbox(
                         label="Statut", value=cd_data_status, lines=2,
@@ -2194,7 +2099,6 @@ def build_ui():
                                             interactive=False)
                     cd_dl_btn.click(fn=cd_download, outputs=cd_dl_log)
 
-                # ── Approche ML ───────────────────────────────────────────────
                 with gr.Accordion("2. Approche ML — SVM + Random Forest", open=False):
                     gr.Markdown(
                         "**Features** : HOG (forme/contours) + histogramme couleur (3×32 bins)  \n"
@@ -2211,7 +2115,6 @@ def build_ui():
                         outputs=[cd_ml_log, cd_ml_cm_svm, cd_ml_cm_rf],
                     )
 
-                # ── Approche DL ───────────────────────────────────────────────
                 with gr.Accordion("3. Approche DL — Transfer Learning EfficientNetB0", open=False):
                     gr.Markdown(
                         "**Base** : EfficientNetB0 pré-entraîné ImageNet (gelé en phase 1)  \n"
@@ -2235,7 +2138,6 @@ def build_ui():
                         outputs=[cd_cnn_log, cd_cnn_curves, cd_cnn_cm],
                     )
 
-                # ── Courbe d'apprentissage ─────────────────────────────────────
                 with gr.Accordion("📈 Courbe d'apprentissage", open=False):
                     gr.Markdown(
                         "Features EfficientNetB0 extraites une seule fois (batches 32) "
@@ -2251,7 +2153,6 @@ def build_ui():
                         outputs=[cd_lc_plot, cd_lc_diag],
                     )
 
-                # ── Prédiction ────────────────────────────────────────────────
                 with gr.Accordion("4. Prédiction", open=False):
                     gr.Markdown(
                         "Chargez une image — les modèles entraînés prédisent en parallèle.  \n"
@@ -2272,7 +2173,6 @@ def build_ui():
                                  cd_pred_cnn, cd_pred_ensemble],
                     )
 
-                # ── Grad-CAM ──────────────────────────────────────────────────
                 with gr.Accordion("🔥 Grad-CAM — Zones d'attention du CNN", open=False):
                     gr.Markdown(
                         "**Grad-CAM** visualise les zones de l'image sur lesquelles "
@@ -2289,7 +2189,6 @@ def build_ui():
                         outputs=[cd_gcam_fig, cd_gcam_msg],
                     )
 
-            # ── TAB 7 : PRIX MAISON ───────────────────────────────────────────
             with gr.TabItem("🏠 Prix Maison"):
                 gr.Markdown(
                     "## Régression Linéaire — Prédiction de Prix Immobilier\n"
@@ -2299,7 +2198,6 @@ def build_ui():
                 )
 
                 with gr.Row():
-                    # ── Colonne gauche : Dataset ──────────────────────────────
                     with gr.Column():
                         gr.Markdown("### 1. Créer le dataset")
                         price_n_slider    = gr.Slider(20, 500, value=100, step=10,
@@ -2310,7 +2208,6 @@ def build_ui():
                         price_gen_status  = gr.Textbox(label="Statut", interactive=False, lines=5)
                         price_dataset_plot = gr.Plot(label="Nuage de points")
 
-                    # ── Colonne droite : Entraînement ─────────────────────────
                     with gr.Column():
                         gr.Markdown("### 2. Entraîner le modèle")
                         price_train_btn   = gr.Button("Entraîner la régression linéaire",
@@ -2327,7 +2224,6 @@ def build_ui():
                                                  label="Surface de la maison (m²)")
                 price_pred_result = gr.Markdown("*Entraînez d'abord le modèle.*")
 
-                # ── Courbe d'apprentissage ─────────────────────────────────────
                 with gr.Accordion("📈 Courbe d'apprentissage (R²)", open=False):
                     gr.Markdown(
                         "Entraîne la régression sur des fractions croissantes du dataset "
@@ -2339,7 +2235,6 @@ def build_ui():
                     price_lc_plot = gr.Plot(label="Courbe d'apprentissage — R²")
                     price_lc_diag = gr.Textbox(label="Diagnostic", interactive=False, lines=5)
 
-                # Événements
                 price_gen_btn.click(
                     fn=price_generate_dataset_cb,
                     inputs=[price_n_slider, price_noise_slider, state],
@@ -2350,7 +2245,6 @@ def build_ui():
                     inputs=[price_n_slider, price_noise_slider, state],
                     outputs=[state, price_reg_plot, price_metrics_md],
                 )
-                # Prédiction en temps réel à chaque mouvement du slider
                 price_surface_slider.change(
                     fn=price_predict_cb,
                     inputs=[price_surface_slider, state],
@@ -2362,7 +2256,6 @@ def build_ui():
                     outputs=[price_lc_plot, price_lc_diag],
                 )
 
-            # ── TAB 8 : CHIFFRES MNIST ────────────────────────────────────────
             with gr.TabItem("🔢 Chiffres MNIST"):
                 gr.Markdown(
                     "## Reconnaissance de Chiffres Manuscrits — Deep Learning (CNN)\n"
@@ -2370,7 +2263,6 @@ def build_ui():
                     "du dataset **MNIST** (70 000 images 28×28, niveaux de gris)."
                 )
 
-                # ── Architecture (accordéon pédagogique) ──────────────────────
                 with gr.Accordion("🏗️ Architecture du CNN", open=False):
                     gr.Markdown(
                         "```\n"
@@ -2391,7 +2283,6 @@ def build_ui():
                     )
 
                 with gr.Row():
-                    # ── Colonne gauche : Données + Entraînement ───────────────
                     with gr.Column(scale=1):
                         gr.Markdown("### 1. Charger les données")
                         with gr.Row():
@@ -2417,7 +2308,6 @@ def build_ui():
                         mnist_train_log  = gr.Textbox(label="Log d'entraînement",
                                                       interactive=False, lines=10)
 
-                    # ── Colonne droite : Résultats ────────────────────────────
                     with gr.Column(scale=1):
                         gr.Markdown("### Résultats")
                         mnist_summary_md  = gr.Markdown(
@@ -2426,7 +2316,6 @@ def build_ui():
                         mnist_curves_plot = gr.Plot(label="Courbes train / test")
                         mnist_cm_plot     = gr.Plot(label="Matrice de confusion (10×10)")
 
-                # ── Prédiction ────────────────────────────────────────────────
                 gr.Markdown("### 3. Prédire un chiffre")
                 gr.Markdown(
                     "Dessinez un chiffre (trait **blanc** sur fond **noir**, style MNIST) "
@@ -2449,7 +2338,6 @@ def build_ui():
                         mnist_pred_label  = gr.Label(label="Probabilités par classe",
                                                      num_top_classes=10)
 
-                # ── Courbe d'apprentissage ─────────────────────────────────────
                 with gr.Accordion("📈 Courbe d'apprentissage", open=False):
                     gr.Markdown(
                         "Entraîne une **Régression Logistique** sklearn sur des fractions "
@@ -2464,7 +2352,6 @@ def build_ui():
                     mnist_lc_diag = gr.Textbox(label="Diagnostic", interactive=False,
                                                lines=5)
 
-                # Événements
                 mnist_load_btn.click(
                     fn=mnist_load_cb,
                     inputs=[state],
@@ -2476,7 +2363,6 @@ def build_ui():
                     outputs=[state, mnist_train_log, mnist_curves_plot,
                              mnist_cm_plot, mnist_summary_md],
                 )
-                # Bouton "Charger et entraîner" — chaîne les deux opérations
                 mnist_load_train_btn.click(
                     fn=mnist_load_cb,
                     inputs=[state],
@@ -2498,7 +2384,6 @@ def build_ui():
                     outputs=[mnist_lc_plot, mnist_lc_diag],
                 )
 
-                # ── Grad-CAM MNIST ────────────────────────────────────────────
                 with gr.Accordion("🔥 Grad-CAM — Ce que le CNN voit", open=False):
                     gr.Markdown(
                         "**Grad-CAM** met en évidence les pixels déterminants pour "
@@ -2531,7 +2416,6 @@ def build_ui():
                         outputs=[mnist_gcam_fig, mnist_gcam_msg],
                     )
 
-            # ── TAB 6 : CHAT ──────────────────────────────────────────────────
             with gr.TabItem("💬 Chat"):
                 chat_modality = gr.Radio(
                     ["Texte", "Image", "Audio"], value="Texte",
@@ -2558,7 +2442,6 @@ def build_ui():
                     outputs=[chatbot, chat_input],
                 )
 
-            # ── TAB 9 : K-MEANS CLUSTERING ────────────────────────────────────
             with gr.TabItem("🔵 Clustering"):
                 gr.Markdown(
                     "## K-Means Clustering — Apprentissage Non Supervisé\n"
@@ -2629,7 +2512,6 @@ def build_ui():
                     outputs=[state, cl_tsne_fig, cl_run_msg],
                 )
 
-            # ── TAB 10 : RÉGRESSION MULTIVARIÉE ──────────────────────────────
             with gr.TabItem("🏘️ Régression Multi"):
                 gr.Markdown(
                     "## Régression Multivariée — California Housing\n"
@@ -2703,7 +2585,6 @@ def build_ui():
                     outputs=[state, mr_imp_fig, mr_sc_fig, mr_summary_md],
                 )
 
-            # ── TAB 11 : DASHBOARD ────────────────────────────────────────────
             with gr.TabItem("📊 Dashboard"):
                 gr.Markdown(
                     "## Tableau de Bord — Vue d'Ensemble des Modèles\n"
@@ -2733,9 +2614,6 @@ def build_ui():
     return demo
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     demo = build_ui()
